@@ -1,5 +1,12 @@
 ---
-# from github.com
-- src: https://github.com/Octostarco/ansible-role-rke2
-  scm: git
-  name: rke2
+# Use local ansible-role-rke2 folder with LXC optimizations
+# This project includes a customized version of the role with LXC container fixes
+# The local role is located at: ./ansible-role-rke2/
+#
+# External role is disabled to use our LXC-optimized version:
+# - src: https://github.com/Octostarco/ansible-role-rke2
+#   scm: git
+#   name: rke2
+
+# Empty requirements list - using local role instead
+[]

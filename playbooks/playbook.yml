@@ -14,13 +14,13 @@
     # Examples: 'nvidia', 'compute', 'gpu-node', etc.
     gpu_detection_pattern: "{{ gpu_node_pattern | default('gpu') }}"
 
-    has_gpu_nodes: "{{ groups['all'] | select('search', gpu_detection_pattern) | list | length > 0 }}"
+    # Check for GPU nodes using a more compatible approach
+    has_gpu_nodes: "{{ groups['all'] | map('extract', hostvars, 'inventory_hostname') | select('match', '.*' + gpu_detection_pattern + '.*') | list | length > 0 }}"
 
     rke2_custom_manifests: >-
       {{
         ( [ playbook_dir + '/../manifests/local-path-provisioner.yaml' ] if use_local_path_provisioner else [] )
         + ( [ playbook_dir + '/../manifests/rke2-nvidia.yaml' ] if has_gpu_nodes else [] )
-        + ( [ playbook_dir + '/../manifests/rancher.yaml' ] if install_rancher else [] )
       }}
 
     rke2_server_node_taints:
@@ -31,8 +31,8 @@
 
     rke2_ha_mode: true
 
-    # We do not use kubeproxy, but cilium replacement
-    disable_kube_proxy: true
+    # Keep kube-proxy enabled for Flannel CNI in LXC containers
+    disable_kube_proxy: false
 
     rke2_ha_mode_keepalived: false
 
@@ -90,6 +90,161 @@
       ansible.builtin.fail:
         msg: No ubuntu 24 but {{ ansible_distribution_major_version }}
       when: ansible_distribution_major_version != '24'
+
+    # ===== AUTOMATED CONTAINER SETUP TASKS =====
+    # Note: User creation must be done manually via pct exec before running Ansible
+    # since Ansible needs SSH access which requires the user to exist first
+    
+    - name: Update apt cache and upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: full
+        force_apt_get: yes
+        cache_valid_time: 3600
+
+    - name: Install essential packages
+      apt:
+        name:
+          - build-essential
+          - curl
+          - vim
+          - gnupg
+          - lsb-release
+          - unzip
+          - sudo
+          - ca-certificates
+          - software-properties-common
+          - p7zip-full
+          - git
+          - python3
+          - python3-pip
+          - python3-venv
+        state: present
+        force_apt_get: yes
+
+    - name: Create apt keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Install Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        keyring: /etc/apt/keyrings/docker.gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable"
+        state: present
+        filename: docker
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add current user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Test Docker installation
+      shell: docker run hello-world
+      register: docker_test
+      failed_when: false
+
+    - name: Display Docker test result
+      debug:
+        msg: "Docker test: {{ 'PASSED' if docker_test.rc == 0 else 'FAILED' }}"
+
+    # GPU-specific tasks for containers with 'gpu' in hostname
+    - name: Check if this is a GPU node
+      set_fact:
+        is_gpu_node: "{{ gpu_detection_pattern in inventory_hostname }}"
+
+    - name: Install NVIDIA driver dependencies (GPU nodes only)
+      apt:
+        name:
+          - build-essential
+          - dkms
+          - linux-headers-generic
+        state: present
+      when: is_gpu_node
+
+    - name: Check if NVIDIA driver installer exists
+      stat:
+        path: "/root/NVIDIA-Linux-x86_64-575.64.05.run"
+      register: nvidia_installer
+      when: is_gpu_node
+
+    - name: Install NVIDIA driver (GPU nodes only)
+      shell: |
+        chmod +x /root/NVIDIA-Linux-x86_64-575.64.05.run
+        /root/NVIDIA-Linux-x86_64-575.64.05.run --dkms --no-questions --ui=none --no-kernel-module --no-drm --install-libglvnd
+        ldconfig
+      when: is_gpu_node and nvidia_installer.stat.exists
+      register: nvidia_driver_install
+      failed_when: false
+
+    - name: Test NVIDIA driver installation (GPU nodes only)
+      command: nvidia-smi
+      register: nvidia_test
+      failed_when: false
+      when: is_gpu_node and nvidia_driver_install is succeeded
+
+    - name: Display NVIDIA driver test result
+      debug:
+        msg: "NVIDIA driver test: {{ 'PASSED' if nvidia_test.rc == 0 else 'FAILED' }}"
+      when: is_gpu_node and nvidia_test is defined
+
+    - name: Install NVIDIA Container Toolkit GPG key (GPU nodes only)
+      shell: |
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
+
+    - name: Add NVIDIA Container Toolkit repository (GPU nodes only)
+      shell: |
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
+
+    - name: Install NVIDIA Container Toolkit (GPU nodes only)
+      apt:
+        name: nvidia-container-toolkit
+        state: present
+        update_cache: yes
+      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
+
+    - name: Configure Docker for NVIDIA runtime (GPU nodes only)
+      shell: |
+        nvidia-ctk runtime configure --runtime=docker
+        systemctl restart docker
+      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
+
+    - name: Test NVIDIA Docker integration (GPU nodes only)
+      shell: docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi
+      register: nvidia_docker_test
+      failed_when: false
+      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
+
+    - name: Display NVIDIA Docker test result
+      debug:
+        msg: "NVIDIA Docker test: {{ 'PASSED' if nvidia_docker_test.rc == 0 else 'FAILED' }}"
+      when: is_gpu_node and nvidia_docker_test is defined
+
+    # ===== END AUTOMATED CONTAINER SETUP TASKS =====
 
     - name: Check if the NetworkManager directory exists
       ansible.builtin.stat:
@@ -513,86 +668,154 @@
         {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=300s
       when: rke2_type == 'server' and (use_local_path_provisioner | bool)
 
-    - name: Wait for Rancher deployment to be ready
+    - name: Install k9s for cluster diagnostics
       shell: |
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=available deployment/rancher -n cattle-system --timeout=600s
-      when: rke2_type == 'server' and (install_rancher | bool)
-      register: rancher_deployment_result
-      retries: 3
-      delay: 30
-
-    - name: Get Rancher service information
-      shell: |
-        echo "=== Rancher Access Information ==="
-        echo "NodePort Access:"
-        echo "  HTTP:  http://{{ inventory_hostname }}:30080"
-        echo "  HTTPS: https://{{ inventory_hostname }}:30443"
-        echo ""
-        echo "LoadBalancer Access (if available):"
-        LB_IP=$({{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get svc rancher-lb -n cattle-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Pending")
-        if [ "$LB_IP" != "Pending" ] && [ -n "$LB_IP" ]; then
-          echo "  HTTP:  http://$LB_IP"
-          echo "  HTTPS: https://$LB_IP"
-        else
-          echo "  LoadBalancer IP: Pending (use NodePort instead)"
+        # Download and install k9s
+        K9S_VERSION="v0.32.5"
+        curl -sL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" | tar xzf - k9s
+        sudo mv k9s /usr/local/bin/
+        chmod +x /usr/local/bin/k9s
+        
+        # Create k9s config directory
+        mkdir -p /root/.config/k9s
+        
+        # Set up k9s configuration to use the RKE2 kubeconfig
+        cat > /root/.config/k9s/config.yaml << EOF
+        k9s:
+          logger:
+            tail: 100
+            buffer: 5000
+            sinceSeconds: -1
+            fullScreenLogs: false
+            textWrap: false
+            showTime: false
+          currentContext: default
+          currentCluster: default
+          clusters:
+            default:
+              namespace:
+                active: default
+                lockFavorites: false
+              view:
+                active: pods
+              portForwardAddress: localhost
+        EOF
+        
+        # Add k9s alias and kubeconfig to bashrc if not already present
+        if ! grep -q "alias k9s" /root/.bashrc; then
+          echo 'alias k9s="KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s"' >> /root/.bashrc
         fi
+        
+        # Create a simple script for easy k9s access
+        cat > /usr/local/bin/k9s-cluster << 'EOF'
+        #!/bin/bash
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        /usr/local/bin/k9s "$@"
+        EOF
+        chmod +x /usr/local/bin/k9s-cluster
+        
+        echo "k9s installed successfully. Use 'k9s-cluster' or 'KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s' to access cluster diagnostics"
+      when: rke2_type == 'server'
+      register: k9s_install_result
+
+    - name: Display k9s installation result
+      debug:
+        msg: "{{ k9s_install_result.stdout_lines }}"
+      when: rke2_type == 'server' and k9s_install_result.stdout_lines is defined
+
+    - name: Get cluster health information
+      shell: |
+        echo "=== RKE2 Cluster Health Check ==="
+        echo "Cluster nodes:"
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o wide
         echo ""
-        echo "Initial Bootstrap Password: {{ rancher_bootstrap_password | default('rancherbootstrap123') }}"
-        echo "Hostname configured: {{ rancher_hostname | default('rancher.local') }}"
+        echo "System pods status:"
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get pods -n kube-system
+        echo ""
+        echo "Storage classes:"
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get storageclass
+        echo ""
+        echo "=== Cluster Access Information ==="
+        echo "• Use kubectl: export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+        echo "• Use k9s (TUI): k9s-cluster"
+        echo "• Or: KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s"
         echo ""
         echo "=== Cluster Smoke Test Results ==="
+        echo "✓ RKE2 Cluster: Operational"
+        echo "✓ Flannel CNI: Active"
+        {% if use_local_path_provisioner %}
         echo "✓ Local Path Provisioner: Ready"
-        echo "✓ Rancher UI: Deployed and Available"
-        echo "✓ Cluster Status: Healthy"
-      when: rke2_type == 'server' and (install_rancher | bool)
-      register: rancher_info
+        {% endif %}
+        {% if has_gpu_nodes %}
+        echo "✓ NVIDIA GPU Operator: Deployed"
+        {% endif %}
+        echo "✓ k9s TUI: Installed for diagnostics"
+      when: rke2_type == 'server'
+      register: cluster_info
 
-    - name: Display Rancher access information
+    - name: Display cluster access information
       debug:
-        msg: "{{ rancher_info.stdout_lines }}"
-      when: rke2_type == 'server' and (install_rancher | bool) and rancher_info.stdout_lines is defined
+        msg: "{{ cluster_info.stdout_lines }}"
+      when: rke2_type == 'server' and cluster_info.stdout_lines is defined
 
-    - name: Create Rancher access info file
+    - name: Create cluster access info file
       copy:
         content: |
-          # Rancher Access Information
+          # RKE2 Cluster Access Information
           
-          ## Web Interface Access
+          ## Kubectl Access
           
-          ### NodePort Access (Always Available)
-          - HTTP:  http://{{ inventory_hostname }}:30080
-          - HTTPS: https://{{ inventory_hostname }}:30443
-          
-          ### LoadBalancer Access (If Available)
-          Use the following command to check LoadBalancer IP:
-          ```
-          kubectl get svc rancher-lb -n cattle-system
+          Export the kubeconfig environment variable:
+          ```bash
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          kubectl get nodes
           ```
           
-          ## Initial Login
-          - Username: admin
-          - Bootstrap Password: {{ rancher_bootstrap_password | default('rancherbootstrap123') }}
+          ## k9s Terminal UI
           
-          ## First-Time Setup
-          1. Access Rancher via one of the URLs above
-          2. Set a permanent admin password
-          3. Configure server URL to match your access method
-          4. Import your local cluster (it should appear automatically)
+          For interactive cluster management and diagnostics:
+          ```bash
+          # Simple alias script
+          k9s-cluster
           
-          ## Configured Hostname
-          - Rancher Hostname: {{ rancher_hostname | default('rancher.local') }}
+          # Or direct command
+          KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s
+          ```
           
-          ## Cluster Smoke Test
+          ## Cluster Components
+          
+          ### Networking
+          - CNI: Flannel (optimized for LXC containers)
+          
+          ### Storage
+          {% if use_local_path_provisioner %}
+          - Local Path Provisioner: Available at {{ local_path_provisioner_path | default('/mnt/data') }}
+          {% endif %}
+          
+          ### GPU Support
+          {% if has_gpu_nodes %}
+          - NVIDIA GPU Operator: Deployed for GPU workloads
+          {% endif %}
+          
+          ## Troubleshooting
+          
+          - View logs: `journalctl -u rke2-server` or `journalctl -u rke2-agent`
+          - Cluster status: `kubectl get nodes,pods --all-namespaces`
+          - Interactive diagnostics: `k9s-cluster`
+          
+          ## Cluster Status
           - ✓ RKE2 Cluster: Operational
-          - ✓ Cilium CNI: Active
+          - ✓ Flannel CNI: Active
+          {% if use_local_path_provisioner %}
           - ✓ Local Path Provisioner: Ready
-          - ✓ Rancher UI: Deployed
+          {% endif %}
           {% if has_gpu_nodes %}
           - ✓ NVIDIA GPU Operator: Deployed
           {% endif %}
-        dest: "{{ playbook_dir }}/../rancher-access-info.md"
+          - ✓ k9s TUI: Installed for diagnostics
+        dest: "{{ playbook_dir }}/../cluster-access-info.md"
         mode: '0644'
-      when: rke2_type == 'server' and (install_rancher | bool)
+      when: rke2_type == 'server'
       delegate_to: localhost
 
   roles:
