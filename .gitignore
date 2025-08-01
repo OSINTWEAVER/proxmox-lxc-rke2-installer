@@ -7,7 +7,7 @@ kubeconfs/
 
 inventories/*.ini
 !inventories/template.ini
-!inventories/hosts.ini
+!inventories/example-*.ini
 
 *tar.gz
 *.log
