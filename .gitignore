@@ -1,0 +1,9 @@
+venv/
+.venv
+roles/
+contexts/
+kubeconfs/
+.DS_Store
+
+inventories/*.ini
+!inventories/template.ini

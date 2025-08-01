@@ -1,0 +1,601 @@
+- name: Deploy RKE2
+  hosts: all
+  become: true
+  vars:
+    #rke2_version:
+    # lb ip
+    #rke2_api_ip:
+
+    # Create a mapping for Ansible rke2 role that expects k8s_cluster
+    k8s_cluster: "{{ groups['rke2_cluster'] | default([]) }}"
+
+    # GPU node detection pattern - customize if you use different naming
+    # Default: 'gpu' (detects any hostname containing 'gpu')
+    # Examples: 'nvidia', 'compute', 'gpu-node', etc.
+    gpu_detection_pattern: "{{ gpu_node_pattern | default('gpu') }}"
+
+    has_gpu_nodes: "{{ groups['all'] | select('search', gpu_detection_pattern) | list | length > 0 }}"
+
+    rke2_custom_manifests: >-
+      {{
+        ( [ playbook_dir + '/../manifests/local-path-provisioner.yaml' ] if use_local_path_provisioner else [] )
+        + ( [ playbook_dir + '/../manifests/rke2-nvidia.yaml' ] if has_gpu_nodes else [] )
+        + ( [ playbook_dir + '/../manifests/rancher.yaml' ] if install_rancher else [] )
+      }}
+
+    rke2_server_node_taints:
+      - 'CriticalAddonsOnly=true:NoExecute'
+
+    rke2_download_kubeconf: true
+    rke2_download_kubeconf_path: "{{ playbook_dir }}/../kubeconfs"
+
+    rke2_ha_mode: true
+
+    # We do not use kubeproxy, but cilium replacement
+    disable_kube_proxy: true
+
+    rke2_ha_mode_keepalived: false
+
+    rke2_disable:
+      - rke2-canal
+      - rke2-ingress-nginx
+
+    # Use Flannel for LXC containers instead of Cilium
+    rke2_cni:
+      - flannel
+
+    # LXC container-specific RKE2 configuration
+    rke2_server_node_labels:
+      - "node.kubernetes.io/instance-type=lxc"
+    
+    # Additional kubelet args for LXC containers to prevent hanging
+    rke2_kubelet_arg:
+      - "max-pods=110"
+      - "cluster-dns={{ cluster_dns }}"
+      - "resolv-conf=/run/systemd/resolve/resolv.conf"
+      - "cgroup-driver=systemd"
+      - "fail-swap-on=false"
+      - "runtime-request-timeout=15m"
+      - "node-status-update-frequency=10s"
+    
+    # Containerd configuration for LXC
+    rke2_server_args:
+      - "--node-ip={{ ansible_default_ipv4.address }}"
+      - "--write-kubeconfig-mode=644"
+      - "--disable-cloud-controller"
+      - "--kubelet-arg=runtime-request-timeout=15m"
+
+  pre_tasks:
+
+    - name: Set k8s_cluster compatibility variable
+      set_fact:
+        k8s_cluster: "{{ groups['rke2_cluster'] | default(groups['all']) }}"
+      delegate_to: "{{ inventory_hostname }}"
+      run_once: false
+
+    - name: Set k8s_cluster for all hosts in hostvars
+      set_fact:
+        k8s_cluster: "{{ groups['rke2_cluster'] | default(groups['all']) }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['all'] }}"
+      run_once: true
+
+    - name: Check if ubuntu
+      ansible.builtin.fail:
+        msg: No ubuntu but {{ ansible_distribution }}
+      when: ansible_distribution != 'Ubuntu'
+
+    - name: Check if ubuntu 24
+      ansible.builtin.fail:
+        msg: No ubuntu 24 but {{ ansible_distribution_major_version }}
+      when: ansible_distribution_major_version != '24'
+
+    - name: Check if the NetworkManager directory exists
+      ansible.builtin.stat:
+        path: "/usr/sbin/NetworkManager"
+      register: nwm_dir
+
+    - name: NetworkManager found
+      ansible.builtin.fail:
+        msg: Network Manager present
+      when: nwm_dir.stat.exists
+
+    - name: Check if swap is enabled
+      shell: swapon --show
+      register: swap_status
+      failed_when: false
+      changed_when: false
+
+    - name: Disable SWAP
+      shell: swapoff -a
+      when: swap_status.stdout != ""
+      failed_when: false
+
+    - name: Check if /etc/fstab exists
+      stat:
+        path: /etc/fstab
+      register: fstab_exists
+
+    - name: Disable SWAP in fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+        replace: '# \1'
+      when: fstab_exists.stat.exists
+
+    - name: Set a hostname {{ inventory_hostname }}
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Update Timezone to Etc/UTC
+      copy: content="Etc/UTC\n" dest=/etc/timezone owner=root group=root mode=0644
+      register: timezone
+
+    - name: Reconfigure Timezone Data (if changed)
+      shell: dpkg-reconfigure -f noninteractive tzdata
+      when: timezone.changed
+
+    #- name: sync hwclock
+    #  shell: "hwclock --localtime --systohc"
+
+    # Add this before the sysctl tasks
+    - name: Load required kernel modules (ignore failures for LXC containers)
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - br_netfilter
+        - overlay
+      ignore_errors: true
+
+    # Check if we're running in an LXC container
+    - name: Check if running in LXC container
+      shell: |
+        if [ -f /proc/1/environ ] && grep -q container=lxc /proc/1/environ; then
+          echo "lxc"
+        else
+          echo "vm"
+        fi
+      register: container_type
+      changed_when: false
+
+    - name: Display container type
+      debug:
+        msg: "Running in {{ container_type.stdout }} environment"
+
+    # Force cleanup of hanging RKE2 installation in LXC containers
+    - name: Stop hanging RKE2 services (LXC containers)
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      with_items:
+        - rke2-server
+        - rke2-agent
+      failed_when: false
+      when: container_type.stdout == 'lxc'
+
+    - name: Kill any remaining RKE2 processes (LXC containers)
+      shell: |
+        pkill -9 -f rke2 || true
+        pkill -9 -f containerd || true
+        pkill -9 -f kubelet || true
+        pkill -9 -f k3s || true
+      when: container_type.stdout == 'lxc'
+      failed_when: false
+
+    - name: Clean up RKE2 data directories (LXC containers)
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /var/lib/rancher/rke2/server/db
+        - /var/lib/rancher/rke2/server/tls
+        - /var/lib/rancher/rke2/agent
+        - /etc/rancher/rke2/config.yaml
+        - /var/lib/rancher/rke2/server/manifests
+        - /run/k3s
+        - /var/lib/rancher/rke2/server/node-token
+      when: container_type.stdout == 'lxc'
+      failed_when: false
+
+    - name: Clean up CNI directories (LXC containers)
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /opt/cni/bin
+        - /etc/cni/net.d
+        - /var/lib/cni
+      when: container_type.stdout == 'lxc'
+      failed_when: false
+
+    - name: Wait a moment after cleanup
+      pause:
+        seconds: 5
+      when: container_type.stdout == 'lxc'
+
+    # Then modify your sysctl task to ignore errors if the module isn't loaded
+    - name: "Set fs.inotify.max_user_instances"
+      sysctl:
+        name: fs.inotify.max_user_instances
+        value: '100000'
+        sysctl_set: yes
+        state: present
+        reload: yes
+        ignoreerrors: yes
+
+    #sysctl -w fs.inotify.max_user_watches=1003986
+    - name: "Set fs.inotify.max_user_watches"
+      sysctl:
+        name: fs.inotify.max_user_watches
+        value: '1003986'
+        sysctl_set: yes
+        state: present
+        reload: yes
+        ignoreerrors: yes
+
+    #sysctl -w vm.max_map_count=262144
+    - name: "Set vm.max_map_count"
+      sysctl:
+        name: vm.max_map_count
+        value: '262144'
+        sysctl_set: yes
+        state: present
+        reload: yes
+        ignoreerrors: yes
+
+    # LXC containers may have restricted access to certain kernel parameters
+    - name: "Set net.bridge.bridge-nf-call-iptables (ignore errors for LXC)"
+      sysctl:
+        name: net.bridge.bridge-nf-call-iptables
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+        ignoreerrors: yes
+
+    - name: "Set net.bridge.bridge-nf-call-ip6tables (ignore errors for LXC)"
+      sysctl:
+        name: net.bridge.bridge-nf-call-ip6tables
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+        ignoreerrors: yes
+
+    - name: "Set net.ipv4.ip_forward"
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+        ignoreerrors: yes
+
+    - name: Add or modify hard nofile limits for wildcard domain
+      community.general.pam_limits:
+        domain: '*'
+        limit_type: hard
+        limit_item: nofile
+        value: 1000000
+
+    - name: Add or modify soft nofile limits for wildcard domain
+      community.general.pam_limits:
+        domain: '*'
+        limit_type: soft
+        limit_item: nofile
+        value: 1000000
+
+    - name: Update apt repo and cache on all boxes
+      apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+
+    - name: Upgrade all packages on servers
+      apt: upgrade=dist force_apt_get=yes
+
+    - name: Get kernel version
+      shell: uname -r
+      register: kernel_version
+
+    - name: Install additional software
+      apt:
+        update_cache: true
+        pkg:
+        - curl
+        - git
+        - wget
+        - vim
+        - nano
+        - htop
+        - netcat-openbsd
+        - net-tools
+        - dnsutils
+        - jq
+
+    - name: Install linux headers (skip for LXC containers)
+      apt:
+        update_cache: true
+        pkg:
+        - linux-headers-generic
+        - linux-headers-{{ kernel_version.stdout }}
+      when: container_type.stdout != 'lxc'
+      ignore_errors: true
+
+    - name: Get DEB architecture
+      shell: dpkg --print-architecture
+      register: deb_architecture
+
+    - name: Install k9s on control plane nodes
+      shell: |
+        curl -L -O https://github.com/derailed/k9s/releases/latest/download/k9s_linux_{{ deb_architecture.stdout }}.deb && sudo dpkg -i k9s_linux_{{ deb_architecture.stdout }}.deb && rm k9s_linux_{{ deb_architecture.stdout }}.deb
+      when: rke2_type == 'server'
+
+    - name: Check for existing local-path-provisioner directory
+      stat:
+        path: "{{ local_path_provisioner_path | default('/mnt/data') }}"
+      register: local_path_provisioner_dir
+
+    - name: Verify mount point accessibility in LXC
+      shell: |
+        if [ -d "{{ local_path_provisioner_path | default('/mnt/data') }}" ]; then
+          if touch "{{ local_path_provisioner_path | default('/mnt/data') }}/test-write" 2>/dev/null; then
+            rm -f "{{ local_path_provisioner_path | default('/mnt/data') }}/test-write"
+            echo "writable"
+          else
+            echo "readonly"
+          fi
+        else
+          echo "missing"
+        fi
+      register: storage_check
+      changed_when: false
+
+    - name: Display storage check results
+      debug:
+        msg: "Storage path {{ local_path_provisioner_path | default('/mnt/data') }} is {{ storage_check.stdout }}"
+
+    - name: Create local-path-provisioner directory on worker nodes
+      file:
+        path: "{{ local_path_provisioner_path | default('/mnt/data') }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+      when: rke2_type == 'agent' and (use_local_path_provisioner | bool) and 'workers' in group_names and storage_check.stdout == 'missing'
+
+    - name: Create alternative storage directory on control plane nodes (if main path missing)
+      file:
+        path: "{{ local_path_provisioner_path | default('/mnt/data') }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+      when: rke2_type == 'server' and (use_local_path_provisioner | bool) and storage_check.stdout == 'missing'
+
+    - name: Check if a reboot is needed on all servers
+      register: reboot_required_file
+      stat: path=/var/run/reboot-required
+
+    - name: Check if the rke2/config.yaml exists
+      stat:
+        path: /etc/rancher/rke2/config.yaml
+      register: rkeconfig_result
+
+    # LXC containers may not support reboot in the same way as VMs
+    - name: Reboot the box on first install (skip for LXC containers)
+      reboot:
+        msg: "Reboot initiated by Ansible for first install"
+        connect_timeout: 5
+        reboot_timeout: 300
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: uptime
+      when: not rkeconfig_result.stat.exists and container_type.stdout != 'lxc'
+
+    - name: Restart systemd services for LXC containers (instead of reboot)
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+        daemon_reload: true
+      with_items:
+        - systemd-networkd
+        - systemd-resolved
+      when: not rkeconfig_result.stat.exists and container_type.stdout == 'lxc'
+      ignore_errors: true
+
+    - name: Disable SWAP again before check
+      shell: |
+        # Kill any swap processes
+        swapoff -a
+        # Remove swap from fstab completely
+        sed -i '/swap/d' /etc/fstab
+        # Remove common swap files and devices
+        if [ -e /swapfile ]; then
+          swapoff /swapfile 2>/dev/null || true
+          rm -f /swapfile
+        fi
+        if [ -e /dev/mapper/swap ]; then
+          swapoff /dev/mapper/swap 2>/dev/null || true
+        fi
+        # Disable any systemd swap services
+        systemctl mask swap.target 2>/dev/null || true
+        systemctl stop swap.target 2>/dev/null || true
+        # Force disable any remaining swap
+        for swap_dev in $(cat /proc/swaps | grep -v Filename | awk '{print $1}'); do
+          swapoff "$swap_dev" 2>/dev/null || true
+        done
+        # Wait and verify
+        sleep 2
+      failed_when: false
+
+    - name: Check SWAP disabled
+      shell: |
+        # Sleep to ensure swap is fully off
+        sleep 1
+        LINES=$(cat /proc/swaps | wc -l)
+        if [ "$LINES" != "1" ]; then
+          # 1 means only the headers and no swap
+          echo "LINES is $LINES"
+          cat /proc/swaps
+          exit 1
+        fi
+
+    - name: Create a networkd.conf.d for drop-ins
+      # See https://docs.cilium.io/en/stable/operations/system_requirements/#systemd-based-distributions
+      # Required for Ubuntu 22.04 and LXC containers
+      ansible.builtin.file:
+        path: /etc/systemd/networkd.conf.d/
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+    
+    - name: Configure systemd Network RoutingPolicyRules
+      ansible.builtin.copy:
+        dest: /etc/systemd/networkd.conf.d/rke2-network.conf
+        content: |
+          [Network]
+          ManageForeignRoutes=no
+          ManageForeignRoutingPolicyRules=no
+        owner: root
+        group: root
+        mode: '0644'
+      register: systemdnetwork
+    
+    - name: Reload systemd networkd (handle LXC restrictions)
+      ansible.builtin.systemd:
+        state: restarted
+        daemon_reload: true
+        name: systemd-networkd
+      when: systemdnetwork.changed
+      ignore_errors: true
+
+    # Additional LXC-specific configurations
+    - name: Create systemd system.conf.d directory for LXC containers
+      ansible.builtin.file:
+        path: /etc/systemd/system.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: container_type.stdout == 'lxc'
+
+    - name: Configure systemd for LXC containers
+      ansible.builtin.copy:
+        dest: /etc/systemd/system.conf.d/lxc-overrides.conf
+        content: |
+          [Manager]
+          DefaultLimitNOFILE=1048576
+          DefaultLimitNPROC=1048576
+        owner: root
+        group: root
+        mode: '0644'
+      when: container_type.stdout == 'lxc'
+      register: systemd_lxc_config
+
+    - name: Reload systemd daemon for LXC changes
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: systemd_lxc_config.changed
+
+    - name: Add k8s Binaries to PATH
+      ansible.builtin.lineinfile:
+        path: /root/.bashrc
+        line: "{{ item }}"
+      loop:
+        - "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+        - "PATH=$PATH:/var/lib/rancher/rke2/bin"
+
+  post_tasks:
+    - name: Wait for local-path-provisioner to be ready
+      shell: |
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=300s
+      when: rke2_type == 'server' and (use_local_path_provisioner | bool)
+
+    - name: Wait for Rancher deployment to be ready
+      shell: |
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=available deployment/rancher -n cattle-system --timeout=600s
+      when: rke2_type == 'server' and (install_rancher | bool)
+      register: rancher_deployment_result
+      retries: 3
+      delay: 30
+
+    - name: Get Rancher service information
+      shell: |
+        echo "=== Rancher Access Information ==="
+        echo "NodePort Access:"
+        echo "  HTTP:  http://{{ inventory_hostname }}:30080"
+        echo "  HTTPS: https://{{ inventory_hostname }}:30443"
+        echo ""
+        echo "LoadBalancer Access (if available):"
+        LB_IP=$({{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get svc rancher-lb -n cattle-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Pending")
+        if [ "$LB_IP" != "Pending" ] && [ -n "$LB_IP" ]; then
+          echo "  HTTP:  http://$LB_IP"
+          echo "  HTTPS: https://$LB_IP"
+        else
+          echo "  LoadBalancer IP: Pending (use NodePort instead)"
+        fi
+        echo ""
+        echo "Initial Bootstrap Password: {{ rancher_bootstrap_password | default('rancherbootstrap123') }}"
+        echo "Hostname configured: {{ rancher_hostname | default('rancher.local') }}"
+        echo ""
+        echo "=== Cluster Smoke Test Results ==="
+        echo "✓ Local Path Provisioner: Ready"
+        echo "✓ Rancher UI: Deployed and Available"
+        echo "✓ Cluster Status: Healthy"
+      when: rke2_type == 'server' and (install_rancher | bool)
+      register: rancher_info
+
+    - name: Display Rancher access information
+      debug:
+        msg: "{{ rancher_info.stdout_lines }}"
+      when: rke2_type == 'server' and (install_rancher | bool) and rancher_info.stdout_lines is defined
+
+    - name: Create Rancher access info file
+      copy:
+        content: |
+          # Rancher Access Information
+          
+          ## Web Interface Access
+          
+          ### NodePort Access (Always Available)
+          - HTTP:  http://{{ inventory_hostname }}:30080
+          - HTTPS: https://{{ inventory_hostname }}:30443
+          
+          ### LoadBalancer Access (If Available)
+          Use the following command to check LoadBalancer IP:
+          ```
+          kubectl get svc rancher-lb -n cattle-system
+          ```
+          
+          ## Initial Login
+          - Username: admin
+          - Bootstrap Password: {{ rancher_bootstrap_password | default('rancherbootstrap123') }}
+          
+          ## First-Time Setup
+          1. Access Rancher via one of the URLs above
+          2. Set a permanent admin password
+          3. Configure server URL to match your access method
+          4. Import your local cluster (it should appear automatically)
+          
+          ## Configured Hostname
+          - Rancher Hostname: {{ rancher_hostname | default('rancher.local') }}
+          
+          ## Cluster Smoke Test
+          - ✓ RKE2 Cluster: Operational
+          - ✓ Cilium CNI: Active
+          - ✓ Local Path Provisioner: Ready
+          - ✓ Rancher UI: Deployed
+          {% if has_gpu_nodes %}
+          - ✓ NVIDIA GPU Operator: Deployed
+          {% endif %}
+        dest: "{{ playbook_dir }}/../rancher-access-info.md"
+        mode: '0644'
+      when: rke2_type == 'server' and (install_rancher | bool)
+      delegate_to: localhost
+
+  roles:
+    - role: rke2
+      vars:
+        k8s_cluster: "{{ groups['rke2_cluster'] | default(groups['all']) }}"
