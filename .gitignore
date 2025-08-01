@@ -7,3 +7,17 @@ kubeconfs/
 
 inventories/*.ini
 !inventories/template.ini
+!inventories/hosts.ini
+
+*tar.gz
+*.log
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite
+*.swp
+*.bak
+*.orig
+push-to-github.sh
+*.pem
