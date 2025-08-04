@@ -51,15 +51,25 @@ else
 fi
 
 echo ""
-echo "6. Manual kubelet test (to see exact error)..."
+echo "6. Checking kubelet configuration file..."
+if [ -f /etc/rancher/rke2/kubelet-config.yaml ]; then
+    echo "✅ Kubelet config file exists"
+    echo "--- CONFIG FILE SIZE ---"
+    ls -la /etc/rancher/rke2/kubelet-config.yaml
+    echo "--- CONFIG FILE CONTENT (first 10 lines) ---"
+    head -10 /etc/rancher/rke2/kubelet-config.yaml
+else
+    echo "❌ Kubelet config file missing at /etc/rancher/rke2/kubelet-config.yaml"
+fi
+
+echo ""
+echo "7. Manual kubelet test (to see exact error)..."
 echo "Attempting to run kubelet manually to see the exact failure..."
 
 # Try to run kubelet directly to see the actual error
 timeout 10 /var/lib/rancher/rke2/bin/kubelet \
     --config=/etc/rancher/rke2/kubelet-config.yaml \
-    --container-runtime-endpoint=unix:///run/docker.sock \
     --kubeconfig=/var/lib/rancher/rke2/agent/kubelet.kubeconfig \
-    --fail-swap-on=false \
     --v=2 2>&1 | head -10 || echo "Kubelet manual test failed"
 
 echo ""
