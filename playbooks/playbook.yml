@@ -48,22 +48,16 @@
     rke2_server_node_labels:
       - "node.kubernetes.io/instance-type=lxc"
     
-    # Additional kubelet args for LXC containers to prevent hanging
+    # Modern kubelet configuration via config file only
+    # All kubelet settings are now handled in kubelet-config.yaml
     rke2_kubelet_arg:
-      - "max-pods=110"
-      - "cluster-dns={{ cluster_dns }}"
-      - "resolv-conf=/run/systemd/resolve/resolv.conf"
-      - "cgroup-driver=systemd"
-      - "fail-swap-on=false"
-      - "runtime-request-timeout=15m"
-      - "node-status-update-frequency=10s"
+      - "config=/etc/rancher/rke2/kubelet-config.yaml"
     
-    # Containerd configuration for LXC
+    # RKE2 server configuration for LXC
     rke2_server_args:
       - "--node-ip={{ ansible_default_ipv4.address }}"
       - "--write-kubeconfig-mode=644"
       - "--disable-cloud-controller"
-      - "--kubelet-arg=runtime-request-timeout=15m"
 
   pre_tasks:
 
