@@ -2,9 +2,10 @@
   hosts: all
   become: true
   vars:
-    #rke2_version:
-    # lb ip
-    #rke2_api_ip:
+    # Uncomment and set if needed:
+    # rke2_version: "v1.30.6+rke2r1"
+    # lb ip  
+    # rke2_api_ip: "10.14.100.1"
 
     # Create a mapping for Ansible rke2 role that expects k8s_cluster
     k8s_cluster: "{{ groups['rke2_cluster'] | default([]) }}"
@@ -41,8 +42,7 @@
       - rke2-ingress-nginx
 
     # Use Flannel for LXC containers instead of Cilium
-    rke2_cni:
-      - flannel
+    rke2_cni: flannel
 
     # LXC container-specific RKE2 configuration
     rke2_server_node_labels:
@@ -90,6 +90,82 @@
       ansible.builtin.fail:
         msg: No ubuntu 24 but {{ ansible_distribution_major_version }}
       when: ansible_distribution_major_version != '24'
+
+    # ===== LXC CONTAINER FIXES =====
+    # Essential fixes for running Kubernetes in LXC containers
+
+    - name: Create /dev/kmsg symlink for kubelet (LXC fix)
+      file:
+        src: /dev/null
+        dest: /dev/kmsg
+        state: link
+        force: true
+      ignore_errors: true
+
+    - name: Create systemd service for persistent /dev/kmsg
+      copy:
+        dest: /etc/systemd/system/create-kmsg.service
+        content: |
+          [Unit]
+          Description=Create /dev/kmsg for LXC containers
+          DefaultDependencies=false
+          Before=rke2-server.service rke2-agent.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c 'ln -sf /dev/null /dev/kmsg 2>/dev/null || true'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable and start create-kmsg service
+      systemd:
+        name: create-kmsg.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Create systemd override directory for RKE2 server
+      file:
+        path: /etc/systemd/system/rke2-server.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Create systemd override directory for RKE2 agent
+      file:
+        path: /etc/systemd/system/rke2-agent.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Create LXC systemd override for RKE2 server
+      copy:
+        dest: /etc/systemd/system/rke2-server.service.d/lxc-override.conf
+        content: |
+          [Service]
+          Delegate=yes
+          TasksMax=infinity
+          LimitNOFILE=1048576
+          LimitNPROC=1048576
+          ExecStartPre=-/bin/sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control || true'
+        mode: '0644'
+
+    - name: Create LXC systemd override for RKE2 agent
+      copy:
+        dest: /etc/systemd/system/rke2-agent.service.d/lxc-override.conf
+        content: |
+          [Service]
+          Delegate=yes
+          TasksMax=infinity
+          LimitNOFILE=1048576
+          LimitNPROC=1048576
+          ExecStartPre=-/bin/sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control || true'
+        mode: '0644'
+
+    - name: Reload systemd daemon after LXC fixes
+      systemd:
+        daemon_reload: true
 
     # ===== AUTOMATED CONTAINER SETUP TASKS =====
     # Note: User creation must be done manually via pct exec before running Ansible

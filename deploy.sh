@@ -32,7 +32,7 @@ cleanup_previous_installs() {
     
     for ip in $ips; do
         echo "  Cleaning up node $ip..."
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 adm4n@$ip "
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 adm4n@$ip "
             sudo systemctl stop rke2-server rke2-agent 2>/dev/null || true
             sudo systemctl disable rke2-server rke2-agent 2>/dev/null || true
             sudo pkill -9 -f rke2 2>/dev/null || true
@@ -115,6 +115,7 @@ setup_local_role
 verify_setup
 
 echo "=== Starting deployment ==="
-ansible-playbook "playbooks/playbook.yml" -i "${INVENTORY}" --ask-become-pass
+echo "  LXC fixes will be applied by Ansible during deployment..."
+ansible-playbook "playbooks/playbook.yml" -i "${INVENTORY}"
 
 echo "=== Deployment completed successfully! ==="

@@ -5,9 +5,8 @@ contexts/
 kubeconfs/
 .DS_Store
 
-inventories/*.ini
-!inventories/template.ini
-!inventories/example-*.ini
+# Inventory files (except templates and examples)
+hosts.ini
 
 *tar.gz
 *.log

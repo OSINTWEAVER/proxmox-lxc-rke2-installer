@@ -1,0 +1,29 @@
+# RKE2 LXC Network Workaround Configuration
+# Add these to your inventory or playbook variables if br_netfilter continues to be problematic
+
+# Use Flannel in host-gw mode (doesn't require br_netfilter)
+rke2_cni: flannel
+rke2_flannel_backend: host-gw
+
+# Alternative: Use Cilium without requiring br_netfilter 
+# rke2_cni: cilium
+# rke2_cilium_config:
+#   enable-ipv4: true
+#   enable-ipv6: false
+#   bpf-masquerade: true
+
+# Disable problematic network features that require br_netfilter
+rke2_kubelet_arg:
+  - "feature-gates=SCTPSupport=false"
+  - "allowed-unsafe-sysctls=net.core.somaxconn"
+
+# Alternative kube-proxy configuration for LXC
+rke2_kube_proxy_arg:
+  - "proxy-mode=iptables"
+  - "masquerade-all=true"
+
+# Ensure systemd doesn't fail on module loading
+rke2_systemd_override: |
+  [Service]
+  ExecStartPre=
+  ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service'
