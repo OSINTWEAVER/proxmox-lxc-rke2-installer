@@ -231,6 +231,45 @@
         state: started
         enabled: yes
 
+    - name: Create Docker daemon configuration for Kubernetes optimization
+      copy:
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "100m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2",
+            "exec-opts": ["native.cgroupdriver=systemd"],
+            "live-restore": true,
+            "userland-proxy": false,
+            "no-new-privileges": false,
+            "insecure-registries": [],
+            "default-ulimits": {
+              "nofile": {
+                "Name": "nofile",
+                "Hard": 1048576,
+                "Soft": 1048576
+              },
+              "nproc": {
+                "Name": "nproc",
+                "Hard": 1048576,
+                "Soft": 1048576
+              }
+            }
+          }
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart docker
+
+    - name: Restart Docker to apply configuration changes
+      systemd:
+        name: docker
+        state: restarted
+
     - name: Add current user to docker group
       user:
         name: "{{ ansible_user }}"
@@ -882,6 +921,13 @@
         mode: '0644'
       when: rke2_type == 'server'
       delegate_to: localhost
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: yes
 
   roles:
     - role: rke2

@@ -104,23 +104,34 @@ else
 fi
 
 echo ""
-echo "4. Checking container runtime..."
+echo "4. Checking container runtime (Docker)..."
 
-if [ -S /run/k3s/containerd/containerd.sock ]; then
-    echo "✅ Containerd socket exists: /run/k3s/containerd/containerd.sock"
+if systemctl is-active --quiet docker; then
+    echo "✅ Docker service is running"
     
-    # Try to query containerd
-    if command -v crictl >/dev/null 2>&1; then
-        if timeout 5 /var/lib/rancher/rke2/bin/crictl version >/dev/null 2>&1; then
-            echo "✅ Containerd is responding"
+    # Check Docker socket
+    if [ -S /var/run/docker.sock ]; then
+        echo "✅ Docker socket exists: /var/run/docker.sock"
+        
+        # Try to query Docker
+        if timeout 5 docker version >/dev/null 2>&1; then
+            echo "✅ Docker is responding"
+            echo "   Docker version: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'Unknown')"
         else
-            echo "❌ Containerd is not responding"
+            echo "❌ Docker is not responding"
         fi
     else
-        echo "⚠️  crictl not available for testing"
+        echo "❌ CRITICAL: Docker socket missing"
     fi
 else
-    echo "❌ CRITICAL: Containerd socket missing"
+    echo "❌ CRITICAL: Docker service is not running"
+fi
+
+# Check for old containerd references
+if [ -S /run/k3s/containerd/containerd.sock ]; then
+    echo "⚠️  Old containerd socket still exists (may cause conflicts)"
+else
+    echo "✅ No conflicting containerd socket found"
 fi
 
 echo ""
