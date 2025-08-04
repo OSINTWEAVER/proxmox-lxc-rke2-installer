@@ -613,8 +613,8 @@
         path: /etc/rancher/rke2/config.yaml
       register: rkeconfig_result
 
-    # LXC containers may not support reboot in the same way as VMs
-    - name: Reboot the box on first install (skip for LXC containers)
+    # LXC containers support reboots - use standard reboot for consistency
+    - name: Reboot the box on first install
       reboot:
         msg: "Reboot initiated by Ansible for first install"
         connect_timeout: 5
@@ -622,18 +622,7 @@
         pre_reboot_delay: 0
         post_reboot_delay: 30
         test_command: uptime
-      when: not rkeconfig_result.stat.exists and container_type.stdout != 'lxc'
-
-    - name: Restart systemd services for LXC containers (instead of reboot)
-      systemd:
-        name: "{{ item }}"
-        state: restarted
-        daemon_reload: true
-      with_items:
-        - systemd-networkd
-        - systemd-resolved
-      when: not rkeconfig_result.stat.exists and container_type.stdout == 'lxc'
-      ignore_errors: true
+      when: not rkeconfig_result.stat.exists
 
     - name: Disable SWAP again before check
       shell: |
