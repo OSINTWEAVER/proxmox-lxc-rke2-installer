@@ -59,14 +59,13 @@
 ## 🎯 **LXC-Optimized Files**
 
 ### Local Role Customizations:
-1. **`ansible-role-rke2/defaults/main.yml`**: Flannel CNI default, LXC timeouts
-2. **`ansible-role-rke2/defaults/lxc_overrides.yml`**: Complete LXC optimization set
-3. **`ansible-role-rke2/handlers/main.yml`**: LXC-safe systemd-sysctl restart
-4. **`ansible-role-rke2/tasks/main.yml`**: IPVS module error tolerance
-5. **`ansible-role-rke2/tasks/first_server.yml`**: LXC service startup fallback
-6. **`ansible-role-rke2/tasks/remaining_nodes.yml`**: LXC-specific service management
-7. **`ansible-role-rke2/tasks/rke2.yml`**: Extended timeouts and error handling
-8. **`ansible-role-rke2/LXC_DEPLOYMENT_GUIDE.md`**: Complete LXC documentation
+1. **`ansible-role-rke2/defaults/main.yml`**: Complete LXC optimization set with Flannel CNI default, extended timeouts, container runtime settings, and error tolerance
+2. **`ansible-role-rke2/handlers/main.yml`**: LXC-safe systemd-sysctl restart
+3. **`ansible-role-rke2/tasks/main.yml`**: IPVS module error tolerance
+4. **`ansible-role-rke2/tasks/first_server.yml`**: LXC service startup fallback
+5. **`ansible-role-rke2/tasks/remaining_nodes.yml`**: LXC-specific service management
+6. **`ansible-role-rke2/tasks/rke2.yml`**: Extended timeouts and error handling
+7. **`ansible-role-rke2/LXC_DEPLOYMENT_GUIDE.md`**: Complete LXC documentation
 
 ### Main Project Files:
 1. **`playbooks/playbook.yml`**: 
