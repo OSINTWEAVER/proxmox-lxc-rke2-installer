@@ -11,15 +11,15 @@ Based on the deployment failure analysis, these critical issues must be fixed:
 
 **REQUIRED FIX**:
 ```bash
-# On Proxmox host, edit LXC container configuration
-nano /etc/pve/lxc/{CONTAINER_ID}.conf
+# Containers must be created as privileged with nesting features
+# Use these parameters during container creation:
 
-# Add these lines:
-privileged: 1
-features: keyctl=1,nesting=1
-lxc.apparmor.profile: unconfined
-lxc.cgroup.devices.allow: a
-lxc.cap.drop:
+pct create {ID} {template} \
+  --unprivileged 0 \
+  --features fuse=1,keyctl=1,nesting=1
+
+# DO NOT add conflicting lxc.apparmor.profile settings
+# The nesting=1 feature handles security profiles automatically
 ```
 
 ### 2. **BR_NETFILTER MODULE NOT LOADED**
@@ -85,11 +85,9 @@ swap: 0
 # CRITICAL: Privileged mode for Kubernetes
 privileged: 1
 
-# CRITICAL: Container features for Kubernetes
-features: keyctl=1,nesting=1
-
-# CRITICAL: Security profile (required for privileged containers)
-lxc.apparmor.profile: unconfined
+# CRITICAL: Container features for Kubernetes (set during creation)
+# These are set with --features fuse=1,keyctl=1,nesting=1 during pct create
+# DO NOT manually add lxc.apparmor.profile settings when using nesting=1
 
 # CRITICAL: Device access
 lxc.cgroup.devices.allow: a
@@ -98,6 +96,7 @@ lxc.cap.drop:
 # CRITICAL: Mount options for Kubernetes
 lxc.mount.auto: cgroup:rw proc:rw sys:rw
 lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+lxc.mount.entry: /lib/modules lib/modules none bind,ro,optional
 
 # CRITICAL: Syscall access (remove seccomp restrictions)
 lxc.seccomp.profile:
@@ -109,6 +108,8 @@ lxc.seccomp.profile:
 # lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
 # lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
 ```
+
+**IMPORTANT**: Do NOT add `lxc.apparmor.profile: unconfined` when using `features: nesting=1`. These settings conflict with each other. The `nesting=1` feature handles the necessary security profile automatically.
 
 ## 🚀 DEPLOYMENT WORKFLOW
 

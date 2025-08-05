@@ -113,17 +113,16 @@ cat << 'EOF'
 # CRITICAL: Privileged mode for Kubernetes
 privileged: 1
 
-# CRITICAL: Container features for Kubernetes
-features: keyctl=1,nesting=1
-
-# CRITICAL: Security profile (required for privileged containers)
-lxc.apparmor.profile: unconfined
+# CRITICAL: Container features (set during creation with --features)
+# Use: --features fuse=1,keyctl=1,nesting=1
+# DO NOT manually add lxc.apparmor.profile when using nesting=1
 
 # CRITICAL: Device and mount access
 lxc.cgroup.devices.allow: a
 lxc.cap.drop:
 lxc.mount.auto: cgroup:rw proc:rw sys:rw
 lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+lxc.mount.entry: /lib/modules lib/modules none bind,ro,optional
 lxc.seccomp.profile:
 EOF
 
