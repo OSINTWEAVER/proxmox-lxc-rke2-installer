@@ -90,7 +90,6 @@
     
     rke2_kube_scheduler_arg:
       # Scheduler optimizations for LXC
-      - "bind-timeout=10s"
       - "kube-api-qps=50"
       - "kube-api-burst=100"
     
