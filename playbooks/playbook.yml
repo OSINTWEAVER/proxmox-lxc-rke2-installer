@@ -75,8 +75,7 @@
       - "service-cluster-ip-range=10.43.0.0/16"
       - "cluster-cidr=10.42.0.0/16"
       - "controllers=*,bootstrapsigner,tokencleaner"
-      - "flex-volume-plugin-dir=/usr/libexec/kubernetes/kubelet-plugins/volume/exec/"
-      - "terminated-pod-gc-threshold=1000"
+      # Removed flex-volume-plugin-dir and terminated-pod-gc-threshold to avoid duplicates with RKE2 defaults
       - "use-service-account-credentials=true"
       - "concurrent-service-syncs=10"
       - "concurrent-rc-syncs=10"
