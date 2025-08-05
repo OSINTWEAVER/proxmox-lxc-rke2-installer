@@ -60,44 +60,50 @@
     rke2_kubelet_arg:
       - "config=/etc/rancher/rke2/kubelet-config.yaml"
     
-    # RKE2 server configuration for LXC
-    rke2_server_args:
+    # RKE2 configuration for LXC - using proper YAML format
+    rke2_kube_apiserver_args:
       # API server optimizations for LXC
-      - "--kube-apiserver-arg=max-requests-inflight=3000"
-      - "--kube-apiserver-arg=max-mutating-requests-inflight=1000"
-      - "--kube-apiserver-arg=watch-cache-sizes=node#100,pod#1000"
-      - "--kube-apiserver-arg=default-watch-cache-size=100"
-      - "--kube-apiserver-arg=delete-collection-workers=10"
-      # etcd optimizations for LXC (if not using SQLite)
-      - "--etcd-arg=heartbeat-interval=250"
-      - "--etcd-arg=election-timeout=1250"
-      - "--etcd-arg=snapshot-count=5000"
-      - "--etcd-arg=quota-backend-bytes=4294967296"
+      - "max-requests-inflight=3000"
+      - "max-mutating-requests-inflight=1000"
+      - "watch-cache-sizes=node#100,pod#1000"
+      - "default-watch-cache-size=100"
+      - "delete-collection-workers=10"
+    
+    rke2_kube_controller_manager_arg:
       # Controller manager optimizations for LXC
-      - "--kube-controller-manager-arg=node-cidr-mask-size=24"
-      - "--kube-controller-manager-arg=service-cluster-ip-range=10.43.0.0/16"
-      - "--kube-controller-manager-arg=cluster-cidr=10.42.0.0/16"
-      - "--kube-controller-manager-arg=controllers=*,bootstrapsigner,tokencleaner"
-      - "--kube-controller-manager-arg=flex-volume-plugin-dir=/usr/libexec/kubernetes/kubelet-plugins/volume/exec/"
-      - "--kube-controller-manager-arg=terminated-pod-gc-threshold=1000"
-      - "--kube-controller-manager-arg=use-service-account-credentials=true"
-      - "--kube-controller-manager-arg=concurrent-service-syncs=10"
-      - "--kube-controller-manager-arg=concurrent-rc-syncs=10"
-      - "--kube-controller-manager-arg=concurrent-namespace-syncs=10"
-      - "--kube-controller-manager-arg=concurrent-gc-syncs=30"
-      - "--kube-controller-manager-arg=node-monitor-period=5s"
-      - "--kube-controller-manager-arg=node-monitor-grace-period=40s"
-      - "--kube-controller-manager-arg=pod-eviction-timeout=5m"
-      - "--kube-controller-manager-arg=concurrent-deployment-syncs=10"
-      - "--kube-controller-manager-arg=concurrent-replicaset-syncs=10"
+      - "node-cidr-mask-size=24"
+      - "service-cluster-ip-range=10.43.0.0/16"
+      - "cluster-cidr=10.42.0.0/16"
+      - "controllers=*,bootstrapsigner,tokencleaner"
+      - "flex-volume-plugin-dir=/usr/libexec/kubernetes/kubelet-plugins/volume/exec/"
+      - "terminated-pod-gc-threshold=1000"
+      - "use-service-account-credentials=true"
+      - "concurrent-service-syncs=10"
+      - "concurrent-rc-syncs=10"
+      - "concurrent-namespace-syncs=10"
+      - "concurrent-gc-syncs=30"
+      - "node-monitor-period=5s"
+      - "node-monitor-grace-period=40s"
+      - "pod-eviction-timeout=5m"
+      - "concurrent-deployment-syncs=10"
+      - "concurrent-replicaset-syncs=10"
+    
+    rke2_kube_scheduler_arg:
       # Scheduler optimizations for LXC
-      - "--kube-scheduler-arg=bind-timeout=10s"
-      - "--kube-scheduler-arg=kube-api-qps=50"
-      - "--kube-scheduler-arg=kube-api-burst=100"
-      # Basic server configuration
-      - "--node-ip={{ ansible_default_ipv4.address }}"
-      - "--write-kubeconfig-mode=644"
-      - "--disable-cloud-controller"
+      - "bind-timeout=10s"
+      - "kube-api-qps=50"
+      - "kube-api-burst=100"
+    
+    # ETCD optimizations for LXC (only used when not in SQLite mode)
+    rke2_etcd_args:
+      - "heartbeat-interval=250"
+      - "election-timeout=1250"
+      - "snapshot-count=5000"
+      - "quota-backend-bytes=4294967296"
+    
+    # Basic server configuration
+    rke2_node_name: "{{ ansible_default_ipv4.address }}"
+    rke2_disable_cloud_controller: true
 
   pre_tasks:
 
