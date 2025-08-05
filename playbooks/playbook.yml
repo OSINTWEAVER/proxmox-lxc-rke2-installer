@@ -60,15 +60,18 @@
     rke2_kubelet_arg:
       - "config=/etc/rancher/rke2/kubelet-config.yaml"
     
-    # RKE2 configuration for LXC - minimal overrides only
-    rke2_kube_apiserver_args: []
-    
-    rke2_kube_controller_manager_arg: []
-    
-    rke2_kube_scheduler_arg: []
-    
-    # ETCD optimizations for LXC (only used when not in SQLite mode)
-    rke2_etcd_args: []
+    # RKE2 configuration for LXC - let RKE2 use its built-in defaults
+    # Note: Empty arrays (rke2_kube_apiserver_args: []) cause malformed --=true flags
+    # By not defining these variables, RKE2 uses its proven defaults
+    # Uncomment and add specific arguments only if needed:
+    # rke2_kube_apiserver_args:
+    #   - "some-specific-flag=value"
+    # rke2_kube_controller_manager_arg:
+    #   - "some-specific-flag=value" 
+    # rke2_kube_scheduler_arg:
+    #   - "some-specific-flag=value"
+    # rke2_etcd_args:
+    #   - "some-specific-flag=value"
     
     # Basic server configuration
     rke2_node_name: "{{ ansible_default_ipv4.address }}"
