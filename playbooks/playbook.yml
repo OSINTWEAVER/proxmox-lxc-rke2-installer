@@ -60,6 +60,7 @@
     # All kubelet settings are now handled in kubelet-config.yaml
     rke2_kubelet_arg:
       - "config=/etc/rancher/rke2/kubelet-config.yaml"
+      - "cloud-provider="
     
     # RKE2 configuration for LXC - let RKE2 use its built-in defaults
     # Note: Empty arrays (rke2_kube_apiserver_args: []) cause malformed --=true flags
@@ -77,6 +78,12 @@
     # Basic server configuration
     rke2_node_name: "{{ ansible_default_ipv4.address }}"
     rke2_disable_cloud_controller: true
+    
+    # Explicitly disable cloud provider to prevent uninitialized taints
+    rke2_kube_apiserver_arg:
+      - "cloud-provider="
+    rke2_kube_controller_manager_arg:
+      - "cloud-provider="
 
   pre_tasks:
 
@@ -872,6 +879,32 @@
         msg: "{{ storage_verification.stdout_lines }}"
       when: use_local_path_provisioner | bool
 
+    - name: Check and remove cloud provider uninitialized taint (prevents pod scheduling)
+      shell: |
+        echo "=== Checking for cloud provider uninitialized taints ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o custom-columns="NODE:.metadata.name,TAINTS:.spec.taints[*].key" | grep -E "cloudprovider|uninitialized" || echo "No cloud provider taints found"
+        echo ""
+        echo "=== Removing cloud provider uninitialized taint from all nodes ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml taint nodes --all node.cloudprovider.kubernetes.io/uninitialized- || echo "Taint not present or already removed"
+        echo ""
+        echo "=== Verifying taints after removal ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml describe nodes | grep -A 2 "Taints:" || echo "No taints found"
+      when: rke2_type == 'server'
+      register: taint_removal_result
+
+    - name: Display taint removal results
+      debug:
+        msg: "{{ taint_removal_result.stdout_lines }}"
+      when: rke2_type == 'server'
+
+    - name: Wait for critical system pods to be ready after taint removal
+      shell: |
+        echo "Waiting for system pods to schedule after taint removal..."
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=300s || echo "CoreDNS wait timed out"
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app.kubernetes.io/name=metrics-server -n kube-system --timeout=300s || echo "Metrics server wait timed out"
+      when: rke2_type == 'server'
+      register: system_pods_wait
+
     - name: Debug custom manifests configuration
       debug:
         msg: |
@@ -926,13 +959,13 @@
     - name: Wait for local-path-provisioner deployment to be available
       shell: |
         echo "Waiting for local-path-provisioner deployment to be created..."
-        for i in {1..60}; do
+        for i in {1..30}; do
           if {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get deployment local-path-provisioner -n local-path-storage >/dev/null 2>&1; then
-            echo "Deployment found after $i seconds"
+            echo "Deployment found after $i attempts"
             break
           fi
-          echo "Waiting... ($i/60)"
-          sleep 5
+          echo "Waiting... ($i/30)"
+          sleep 10
         done
         {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get deployment local-path-provisioner -n local-path-storage
       when: rke2_type == 'server' and (use_local_path_provisioner | bool)
@@ -940,7 +973,7 @@
 
     - name: Wait for local-path-provisioner to be ready
       shell: |
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=600s
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=300s
       when: rke2_type == 'server' and (use_local_path_provisioner | bool)
       register: lpp_wait_result
       failed_when: false
