@@ -1011,6 +1011,15 @@
           Check the debug information above for details.
       when: rke2_type == 'server' and (use_local_path_provisioner | bool) and lpp_wait_result.rc != 0
 
+    - name: Create .kube directory for adm4n user
+      file:
+        path: /home/adm4n/.kube
+        state: directory
+        owner: adm4n
+        group: adm4n
+        mode: '0755'
+      when: rke2_type == 'server'
+
     - name: Configure kubectl access for adm4n user (copy kubeconfig)
       copy:
         src: /etc/rancher/rke2/rke2.yaml
@@ -1020,7 +1029,6 @@
         mode: '0600'
         remote_src: yes
       when: rke2_type == 'server'
-      ignore_errors: true
 
     - name: Update kubeconfig server address for remote access
       replace:
@@ -1028,7 +1036,6 @@
         regexp: 'https://127\.0\.0\.1:6443'
         replace: 'https://{{ ansible_default_ipv4.address }}:6443'
       when: rke2_type == 'server'
-      ignore_errors: true
 
     - name: Test kubectl access
       shell: |
