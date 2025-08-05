@@ -1,5 +1,7 @@
 # RKE2 Ansible Role
 
+> **🚨 LXC DEPLOYMENT NOT SUPPORTED** - This role **CANNOT** successfully deploy RKE2 in LXC containers due to fundamental kubelet/cgroup incompatibility. Use full VMs instead. See [DEPLOYMENT_STATUS.md](../DEPLOYMENT_STATUS.md) for details.
+
 [![Role version](https://img.shields.io/github/v/release/lablabs/ansible-role-rke2)](https://galaxy.ansible.com/ui/standalone/roles/lablabs/rke2)
 [![Role downloads](https://img.shields.io/ansible/role/d/lablabs/rke2)](https://galaxy.ansible.com/lablabs/rke2)
 [![GitHub Actions](https://github.com/lablabs/ansible-role-rke2/workflows/molecule%20test/badge.svg)](https://github.com/lablabs/ansible-role-rke2/actions)
