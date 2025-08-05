@@ -300,9 +300,7 @@
 
     - name: Configure NVIDIA Container Toolkit for RKE2's containerd (GPU nodes only)
       shell: |
-        # Configure for RKE2's embedded containerd
         nvidia-ctk runtime configure --runtime=containerd --config=/var/lib/rancher/rke2/agent/etc/containerd/config.toml.tmpl
-        # Create runtime configuration that RKE2 will use
         mkdir -p /etc/nvidia-container-runtime
         nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place
       when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
