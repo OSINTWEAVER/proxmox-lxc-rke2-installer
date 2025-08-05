@@ -872,6 +872,72 @@
         msg: "{{ storage_verification.stdout_lines }}"
       when: use_local_path_provisioner | bool
 
+    - name: Debug custom manifests configuration
+      debug:
+        msg: |
+          use_local_path_provisioner: {{ use_local_path_provisioner | bool }}
+          has_gpu_nodes: {{ has_gpu_nodes }}
+          playbook_dir: {{ playbook_dir }}
+          rke2_custom_manifests: {{ rke2_custom_manifests }}
+      when: rke2_type == 'server'
+
+    - name: Check if custom manifests were copied correctly
+      shell: |
+        echo "=== Custom manifests directory ==="
+        ls -la {{ rke2_data_path }}/server/manifests/ || echo "Manifests directory not found!"
+        echo ""
+        echo "=== Local-path-provisioner manifest ==="
+        cat {{ rke2_data_path }}/server/manifests/local-path-provisioner.yaml || echo "Local-path-provisioner manifest not found!"
+        echo ""
+        echo "=== RKE2 server logs (last 20 lines) ==="
+        journalctl -u rke2-server --no-pager -n 20 | grep -i "local-path\|manifest\|storage" || echo "No relevant logs found"
+      when: rke2_type == 'server' and (use_local_path_provisioner | bool)
+      register: manifest_check
+
+    - name: Display manifest check results
+      debug:
+        msg: "{{ manifest_check.stdout_lines }}"
+      when: rke2_type == 'server' and (use_local_path_provisioner | bool)
+
+    - name: Debug local-path-provisioner deployment status
+      shell: |
+        echo "=== Checking if local-path-provisioner namespace exists ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get namespace local-path-storage || echo "Namespace missing!"
+        echo ""
+        echo "=== Checking if local-path-provisioner deployment exists ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get deployment -n local-path-storage || echo "No deployments found!"
+        echo ""
+        echo "=== Checking all pods in local-path-storage namespace ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get pods -n local-path-storage -o wide || echo "No pods found!"
+        echo ""
+        echo "=== Checking storage class ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get storageclass || echo "No storage classes found!"
+        echo ""
+        echo "=== Checking if custom manifests were applied ==="
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get pods -A | grep -E "(local-path|storage)" || echo "No storage-related pods found!"
+      when: rke2_type == 'server' and (use_local_path_provisioner | bool)
+      register: lpp_deployment_status
+
+    - name: Display local-path-provisioner deployment status
+      debug:
+        msg: "{{ lpp_deployment_status.stdout_lines }}"
+      when: rke2_type == 'server' and (use_local_path_provisioner | bool)
+
+    - name: Wait for local-path-provisioner deployment to be available
+      shell: |
+        echo "Waiting for local-path-provisioner deployment to be created..."
+        for i in {1..60}; do
+          if {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get deployment local-path-provisioner -n local-path-storage >/dev/null 2>&1; then
+            echo "Deployment found after $i seconds"
+            break
+          fi
+          echo "Waiting... ($i/60)"
+          sleep 5
+        done
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get deployment local-path-provisioner -n local-path-storage
+      when: rke2_type == 'server' and (use_local_path_provisioner | bool)
+      register: lpp_deployment_wait
+
     - name: Wait for local-path-provisioner to be ready
       shell: |
         {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=600s
