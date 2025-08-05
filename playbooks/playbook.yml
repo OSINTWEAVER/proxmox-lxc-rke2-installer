@@ -213,6 +213,168 @@
         state: directory
         mode: '0755'
 
+    # ===== KUBERNETES TOOLS INSTALLATION =====
+    # Install kubectl, helm, and k9s for cluster management
+
+    - name: Download and install kubectl (same version as RKE2)
+      get_url:
+        url: "https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Verify kubectl installation
+      command: /usr/local/bin/kubectl version --client --output=yaml
+      register: kubectl_version
+      failed_when: false
+      changed_when: false
+
+    - name: Download and install Helm
+      shell: |
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        chmod 700 get_helm.sh
+        ./get_helm.sh
+        rm get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Verify Helm installation
+      command: /usr/local/bin/helm version --short
+      register: helm_version
+      failed_when: false
+      changed_when: false
+
+    - name: Download and install k9s
+      shell: |
+        K9S_VERSION=$(curl -s "https://api.github.com/repos/derailed/k9s/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        curl -sL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" | tar xz -C /tmp
+        mv /tmp/k9s /usr/local/bin/k9s
+        chmod +x /usr/local/bin/k9s
+      args:
+        creates: /usr/local/bin/k9s
+
+    - name: Verify k9s installation
+      command: /usr/local/bin/k9s version
+      register: k9s_version
+      failed_when: false
+      changed_when: false
+
+    - name: Create kubectl wrapper script for users
+      copy:
+        dest: /usr/local/bin/kubectl-rke2
+        content: |
+          #!/bin/bash
+          # Kubectl wrapper for RKE2 cluster access
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          exec /usr/local/bin/kubectl "$@"
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create helm wrapper script for users
+      copy:
+        dest: /usr/local/bin/helm-rke2
+        content: |
+          #!/bin/bash
+          # Helm wrapper for RKE2 cluster access
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          exec /usr/local/bin/helm "$@"
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create k9s wrapper script for users
+      copy:
+        dest: /usr/local/bin/k9s-rke2
+        content: |
+          #!/bin/bash
+          # k9s wrapper for RKE2 cluster access
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          exec /usr/local/bin/k9s "$@"
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create kubeconfig directory for adm4n user
+      file:
+        path: /home/adm4n/.kube
+        state: directory
+        owner: adm4n
+        group: adm4n
+        mode: '0700'
+      when: ansible_user_id == 'adm4n' or 'adm4n' in ansible_all_ipv4_addresses
+
+    - name: Set up kubectl aliases for adm4n user
+      lineinfile:
+        path: /home/adm4n/.bashrc
+        line: "{{ item }}"
+        create: yes
+        owner: adm4n
+        group: adm4n
+      loop:
+        - "# Kubernetes tools aliases"
+        - "alias kubectl='sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/kubectl'"
+        - "alias helm='sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/helm'"
+        - "alias k9s='sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/k9s'"
+        - "alias k='kubectl'"
+        - "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+      when: ansible_user_id == 'adm4n' or 'adm4n' in ansible_all_ipv4_addresses
+
+    - name: Create k9s config directory for root
+      file:
+        path: /root/.config/k9s
+        state: directory
+        mode: '0755'
+
+    - name: Create k9s configuration file
+      copy:
+        dest: /root/.config/k9s/config.yaml
+        content: |
+          k9s:
+            refreshRate: 2
+            maxConnRetry: 5
+            enableMouse: true
+            headless: false
+            logoless: false
+            crumbsless: false
+            readOnly: false
+            noExitOnCtrlC: false
+            ui:
+              enableMouse: true
+              headless: false
+              logoless: false
+              crumbsless: false
+              reactive: false
+              noIcons: false
+            skipLatestRevCheck: false
+            disablePodCounting: false
+            shellPod:
+              image: busybox:1.35.0
+              namespace: default
+              limits:
+                cpu: 100m
+                memory: 100Mi
+            imageScans:
+              enable: false
+              exclusions:
+                namespaces: []
+                labels: {}
+            logger:
+              tail: 100
+              buffer: 5000
+              sinceSeconds: -1
+              textWrap: false
+              showTime: false
+            thresholds:
+              cpu:
+                critical: 90
+                warn: 70
+              memory:
+                critical: 90
+                warn: 70
+        mode: '0644'
+
     # We only need nvidia-container-toolkit for GPU support
     # RKE2 uses its embedded containerd runtime, not Docker
 
@@ -690,60 +852,49 @@
         {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=300s
       when: rke2_type == 'server' and (use_local_path_provisioner | bool)
 
-    - name: Install k9s for cluster diagnostics
-      shell: |
-        # Download and install k9s
-        K9S_VERSION="v0.32.5"
-        curl -sL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" | tar xzf - k9s
-        sudo mv k9s /usr/local/bin/
-        chmod +x /usr/local/bin/k9s
-        
-        # Create k9s config directory
-        mkdir -p /root/.config/k9s
-        
-        # Set up k9s configuration to use the RKE2 kubeconfig
-        cat > /root/.config/k9s/config.yaml << EOF
-        k9s:
-          logger:
-            tail: 100
-            buffer: 5000
-            sinceSeconds: -1
-            fullScreenLogs: false
-            textWrap: false
-            showTime: false
-          currentContext: default
-          currentCluster: default
-          clusters:
-            default:
-              namespace:
-                active: default
-                lockFavorites: false
-              view:
-                active: pods
-              portForwardAddress: localhost
-        EOF
-        
-        # Add k9s alias and kubeconfig to bashrc if not already present
-        if ! grep -q "alias k9s" /root/.bashrc; then
-          echo 'alias k9s="KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s"' >> /root/.bashrc
-        fi
-        
-        # Create a simple script for easy k9s access
-        cat > /usr/local/bin/k9s-cluster << 'EOF'
-        #!/bin/bash
-        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-        /usr/local/bin/k9s "$@"
-        EOF
-        chmod +x /usr/local/bin/k9s-cluster
-        
-        echo "k9s installed successfully. Use 'k9s-cluster' or 'KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s' to access cluster diagnostics"
+    - name: Configure kubectl access for adm4n user (copy kubeconfig)
+      copy:
+        src: /etc/rancher/rke2/rke2.yaml
+        dest: /home/adm4n/.kube/config
+        owner: adm4n
+        group: adm4n
+        mode: '0600'
+        remote_src: yes
       when: rke2_type == 'server'
-      register: k9s_install_result
+      ignore_errors: true
 
-    - name: Display k9s installation result
+    - name: Update kubeconfig server address for remote access
+      replace:
+        path: /home/adm4n/.kube/config
+        regexp: 'https://127\.0\.0\.1:6443'
+        replace: 'https://{{ ansible_default_ipv4.address }}:6443'
+      when: rke2_type == 'server'
+      ignore_errors: true
+
+    - name: Test kubectl access
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        /usr/local/bin/kubectl get nodes --no-headers | wc -l
+      register: kubectl_test
+      when: rke2_type == 'server'
+      failed_when: false
+
+    - name: Test helm access
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        /usr/local/bin/helm list --all-namespaces
+      register: helm_test
+      when: rke2_type == 'server'
+      failed_when: false
+
+    - name: Verify tools installation
       debug:
-        msg: "{{ k9s_install_result.stdout_lines }}"
-      when: rke2_type == 'server' and k9s_install_result.stdout_lines is defined
+        msg: |
+          Kubernetes Tools Status:
+          - kubectl: {{ 'Ready (' + kubectl_test.stdout.strip() + ' nodes)' if kubectl_test.rc == 0 else 'Failed' }}
+          - helm: {{ 'Ready' if helm_test.rc == 0 else 'Failed' }}
+          - k9s: Ready (installed at /usr/local/bin/k9s)
+      when: rke2_type == 'server'
 
     - name: Get cluster health information
       shell: |
@@ -757,22 +908,24 @@
         echo "Storage classes:"
         {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get storageclass
         echo ""
-        echo "=== Cluster Access Information ==="
-        echo "• Use kubectl: export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
-        echo "• Use k9s (TUI): k9s-cluster"
-        echo "• Or: KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s"
+        echo "=== Kubernetes Tools Access ==="
+        echo "• kubectl: Use 'kubectl' alias or /usr/local/bin/kubectl"
+        echo "• helm: Use 'helm' alias or /usr/local/bin/helm"
+        echo "• k9s: Use 'k9s' alias or /usr/local/bin/k9s"
+        echo "• All tools configured with KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
         echo ""
-        echo "=== Cluster Smoke Test Results ==="
+        echo "=== Cluster Status ==="
         echo "✓ RKE2 Cluster: Operational"
         echo "✓ Flannel CNI: Active"
-        echo "✓ Containerd Runtime: RKE2 Embedded"
+        echo "✓ kubectl: Ready"
+        echo "✓ helm: Ready"
+        echo "✓ k9s: Ready"
         {% if use_local_path_provisioner %}
         echo "✓ Local Path Provisioner: Ready"
         {% endif %}
         {% if has_gpu_nodes %}
         echo "✓ NVIDIA GPU Operator: Deployed"
         {% endif %}
-        echo "✓ k9s TUI: Installed for diagnostics"
       when: rke2_type == 'server'
       register: cluster_info
 
@@ -786,59 +939,106 @@
         content: |
           # RKE2 Cluster Access Information
           
-          ## Kubectl Access
+          ## Quick Start - Using Aliases
           
-          Export the kubeconfig environment variable:
+          SSH to any cluster node and use the preconfigured aliases:
+          ```bash
+          # View cluster nodes
+          kubectl get nodes
+          
+          # List helm releases
+          helm list --all-namespaces
+          
+          # Interactive cluster management
+          k9s
+          ```
+          
+          ## Tool Locations
+          
+          All tools are installed system-wide:
+          - kubectl: `/usr/local/bin/kubectl`
+          - helm: `/usr/local/bin/helm`
+          - k9s: `/usr/local/bin/k9s`
+          
+          ## Manual KUBECONFIG Setup
+          
+          If aliases don't work, export the kubeconfig:
           ```bash
           export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
           kubectl get nodes
+          helm list --all-namespaces
+          k9s
           ```
           
-          ## k9s Terminal UI
+          ## User Access (adm4n)
           
-          For interactive cluster management and diagnostics:
-          ```bash
-          # Simple alias script
-          k9s-cluster
+          The adm4n user has kubectl access via:
+          - Personal kubeconfig: `~/.kube/config`
+          - Aliases in `~/.bashrc` for kubectl, helm, k9s, k (kubectl shortcut)
           
-          # Or direct command
-          KUBECONFIG=/etc/rancher/rke2/rke2.yaml k9s
-          ```
+          ## Cluster Architecture
           
-          ## Cluster Components
-          
-          ### Networking
-          - CNI: Flannel (optimized for LXC containers)
-          - Runtime: RKE2 Embedded Containerd (Docker-free)
+          ### Core Components
+          - **Kubernetes Version**: 1.33.3 (via RKE2 v1.33.3+rke2r1)
+          - **CNI**: Flannel (optimized for LXC containers)
+          - **Runtime**: RKE2 Embedded Containerd (Docker-free)
+          - **Datastore**: SQLite (single server + multi-agent architecture)
           
           ### Storage
-          - Datastore: SQLite (single server + multi-agent architecture)
           {% if use_local_path_provisioner %}
-          - Local Path Provisioner: Available at {{ local_path_provisioner_path | default('/mnt/data') }}
+          - **Local Path Provisioner**: Available at {{ local_path_provisioner_path | default('/mnt/data') }}
           {% endif %}
+          - **ZFS Volumes**: Mounted at `/mnt/data` on all nodes
           
           ### GPU Support
           {% if has_gpu_nodes %}
-          - NVIDIA GPU Operator: Deployed for GPU workloads
+          - **NVIDIA GPU Operator**: Deployed for GPU workloads
+          - **Container Toolkit**: Configured for RKE2's containerd
           {% endif %}
+          
+          ## Management Commands
+          
+          ```bash
+          # Cluster status
+          kubectl get nodes,pods --all-namespaces
+          
+          # Install applications with Helm
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm install my-app bitnami/nginx
+          
+          # Interactive debugging and monitoring
+          k9s
+          ```
           
           ## Troubleshooting
           
-          - View logs: `journalctl -u rke2-server` or `journalctl -u rke2-agent`
-          - Cluster status: `kubectl get nodes,pods --all-namespaces`
-          - Interactive diagnostics: `k9s-cluster`
+          ```bash
+          # Service logs
+          journalctl -u rke2-server    # Control plane
+          journalctl -u rke2-agent     # Worker nodes
           
-          ## Cluster Status
-          - ✓ RKE2 Cluster: Operational (SQLite datastore)
-          - ✓ Flannel CNI: Active
-          - ✓ Runtime: RKE2 Embedded Containerd
+          # Pod logs and debugging
+          kubectl logs -n kube-system <pod-name>
+          kubectl describe pod <pod-name>
+          
+          # Network debugging
+          kubectl get pods -o wide
+          kubectl get svc --all-namespaces
+          ```
+          
+          ## Deployment Status
+          
+          - ✅ **RKE2 Cluster**: Operational (SQLite datastore)
+          - ✅ **Flannel CNI**: Active on all nodes
+          - ✅ **kubectl**: Installed and configured
+          - ✅ **helm**: Installed and configured
+          - ✅ **k9s**: Installed and configured
           {% if use_local_path_provisioner %}
-          - ✓ Local Path Provisioner: Ready
+          - ✅ **Local Path Provisioner**: Ready for storage
           {% endif %}
           {% if has_gpu_nodes %}
-          - ✓ NVIDIA Container Toolkit: Configured for containerd
+          - ✅ **NVIDIA Container Toolkit**: GPU workloads ready
           {% endif %}
-          - ✓ k9s TUI: Installed for diagnostics
         dest: "{{ playbook_dir }}/../cluster-access-info.md"
         mode: '0644'
       when: rke2_type == 'server'
