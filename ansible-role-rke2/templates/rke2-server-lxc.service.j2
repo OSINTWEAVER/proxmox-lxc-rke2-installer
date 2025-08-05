@@ -1,0 +1,69 @@
+[Unit]
+Description=Rancher Kubernetes Engine v2 (server) - LXC Optimized
+Documentation=https://github.com/rancher/rke2#readme
+Documentation=https://kubernetes.io/docs/setup/production-environment/
+Wants=network-online.target
+After=network-online.target create-kmsg.service lxc-mount-optimizations.service
+Requires=create-kmsg.service
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=simple
+# LXC-specific pre-checks and setup
+ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service'
+ExecStartPre=/usr/local/bin/setup-gpu-devices.sh
+ExecStartPre=/bin/sh -c 'ln -sf /dev/null /dev/kmsg 2>/dev/null || true'
+ExecStartPre=/bin/sh -c 'mount --make-rshared / 2>/dev/null || true'
+
+# Main RKE2 server process (uses built-in containerd, not Docker)
+ExecStart={{ rke2_bin_path | default('/usr/local/bin/rke2') }} server
+
+# Enhanced cleanup for LXC environment
+ExecStopPost=/bin/sh -c "systemctl kill --kill-who=all --signal=SIGTERM rke2-server.service || true"
+ExecStopPost=/bin/sh -c 'pkill -f "rke2.*server" || true'
+
+# Process management optimized for LXC
+KillMode=mixed
+Delegate=yes
+
+# Extended timeouts for LXC container startup latency
+TimeoutStartSec=900
+TimeoutStopSec=300
+RestartSec=15
+Restart=always
+RestartPreventExitStatus=78
+
+# LXC-optimized environment variables
+Environment=GOGC=75
+Environment=GOMEMLIMIT=2GiB
+Environment=RKE2_DEBUG=false
+Environment=CONTAINERD_LOG_LEVEL=info
+
+# Enhanced resource limits for LXC containers
+LimitNOFILE=1048576
+LimitNPROC=1048576
+LimitCORE=infinity
+LimitMEMLOCK=infinity
+TasksMax=infinity
+
+# OOM handling for container environments
+OOMScoreAdjust=-999
+MemoryAccounting=true
+
+# Enhanced logging and monitoring
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rke2-server
+
+# Security enhancements
+NoNewPrivileges=false
+PrivateTmp=false
+
+# Environment configuration
+EnvironmentFile=-/etc/default/rke2-server
+EnvironmentFile=-/etc/rancher/rke2/rke2.env
+
+# Working directory
+WorkingDirectory=/var/lib/rancher/rke2

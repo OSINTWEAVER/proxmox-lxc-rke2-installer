@@ -1,0 +1,78 @@
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+
+# Container runtime configuration - RKE2's embedded containerd
+containerRuntimeEndpoint: "unix:///run/k3s/containerd/containerd.sock"
+runtimeRequestTimeout: "15m0s"
+
+# Authentication configuration
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    enabled: true
+  x509:
+    clientCAFile: "/var/lib/rancher/rke2/agent/client-ca.crt"
+
+authorization:
+  mode: Webhook
+
+# LXC-optimized cgroup and resource management
+cgroupDriver: systemd
+cgroupsPerQOS: false  # Disable QoS cgroups in LXC
+enforceNodeAllocatable: []  # Disable node resource enforcement in LXC
+protectKernelDefaults: false  # Required for LXC containers
+
+# Disable resource reservations that cause parsing issues in LXC
+# kubeReserved and systemReserved can cause strconv.Atoi errors in LXC containers
+
+# Core kubelet settings optimized for LXC
+maxPods: 110
+failSwapOn: false
+
+# LXC-specific feature gates - only disable problematic ones
+featureGates:
+  NodeSwap: false  # Kubernetes prefers no swap
+  
+# Eviction thresholds optimized for LXC containers
+evictionHard:
+  memory.available: "100Mi"
+  nodefs.available: "10%"
+  imagefs.available: "15%"
+
+evictionSoft:
+  memory.available: "200Mi"
+  nodefs.available: "15%"
+  imagefs.available: "20%"
+
+evictionSoftGracePeriod:
+  memory.available: "1m30s"
+  nodefs.available: "1m30s"
+  imagefs.available: "1m30s"
+
+# Logging configuration
+logging:
+  format: json
+  verbosity: 2
+
+# LXC container optimizations
+serializeImagePulls: false
+registryPullQPS: 10
+registryBurst: 20
+
+# Network configuration
+hairpinMode: "hairpin-veth"
+clusterDNS:
+  - "{{ rke2_cluster_dns | default('10.43.0.10') }}"
+clusterDomain: "{{ rke2_cluster_domain | default('cluster.local') }}"
+
+# Server configuration
+address: "0.0.0.0"
+healthzBindAddress: "0.0.0.0"
+healthzPort: 10248
+readOnlyPort: 0
+
+# Image garbage collection optimized for LXC
+imageGCHighThresholdPercent: 85
+imageGCLowThresholdPercent: 80

@@ -1,0 +1,20 @@
+#!/bin/bash
+# Simplified kubelet wrapper for RKE2 in LXC containers
+# Instead of filtering arguments, we rely on proper kubelet-config.yaml
+
+# Simply pass through to the original kubelet with proper config
+REAL_KUBELET="/var/lib/rancher/rke2/bin/kubelet.original"
+
+if [ ! -f "$REAL_KUBELET" ]; then
+  # First run, back up the kubelet
+  if [ -f "/var/lib/rancher/rke2/bin/kubelet" ]; then
+    cp "/var/lib/rancher/rke2/bin/kubelet" "$REAL_KUBELET"
+    chmod +x "$REAL_KUBELET"
+  else
+    echo "ERROR: Original kubelet binary not found"
+    exit 1
+  fi
+fi
+
+# Pass all arguments through - configuration is handled by kubelet-config.yaml
+exec $REAL_KUBELET "$@"

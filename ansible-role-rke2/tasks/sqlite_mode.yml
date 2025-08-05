@@ -1,0 +1,77 @@
+---
+# Tasks for SQLite mode setup
+- name: Create directory for SQLite database
+  ansible.builtin.file:
+    path: /var/lib/rancher/rke2/server/db
+    state: directory
+    mode: '0700'
+    owner: root
+    group: root
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]
+
+- name: Initialize SQLite database file with proper permissions
+  ansible.builtin.file:
+    path: /var/lib/rancher/rke2/server/db/state.db
+    state: touch
+    mode: '0600'
+    owner: root
+    group: root
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]
+
+- name: Create systemd override directory for SQLite mode
+  ansible.builtin.file:
+    path: /etc/systemd/system/rke2-server.service.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]
+
+- name: Deploy systemd override for SQLite mode
+  ansible.builtin.template:
+    src: rke2-server-sqlite.conf.j2
+    dest: /etc/systemd/system/rke2-server.service.d/99-sqlite-fix.conf
+    mode: '0644'
+    owner: root
+    group: root
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]
+  notify:
+    - Restart RKE2 Server
+
+- name: Create systemd override directory for agents in SQLite mode
+  ansible.builtin.file:
+    path: /etc/systemd/system/rke2-agent.service.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  when: 
+    - inventory_hostname in groups[rke2_agents_group_name]
+
+- name: Deploy systemd override for agents in SQLite mode
+  ansible.builtin.template:
+    src: rke2-agent-sqlite.conf.j2
+    dest: /etc/systemd/system/rke2-agent.service.d/99-sqlite-fix.conf
+    mode: '0644'
+    owner: root
+    group: root
+  when: 
+    - inventory_hostname in groups[rke2_agents_group_name]
+  notify:
+    - Restart RKE2 Agent
+
+- name: Reload systemd after SQLite overrides
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name] or inventory_hostname in groups[rke2_agents_group_name]
+
+- name: Log SQLite mode activation
+  ansible.builtin.debug:
+    msg: "SQLite mode activated for {{ inventory_hostname }}. SQLite database will be used instead of etcd."
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]

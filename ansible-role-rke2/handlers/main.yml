@@ -1,0 +1,49 @@
+---
+
+- name: Restart keepalived
+  ansible.builtin.service:
+    name: keepalived
+    state: restarted
+
+- name: Restart systemd-sysctl
+  ansible.builtin.service:
+    state: restarted
+    name: systemd-sysctl
+  failed_when: false  # LXC containers may have restricted systemd capabilities
+  ignore_errors: true  # Ensure deployment continues even if sysctl restart fails
+
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Config file changed
+  ansible.builtin.set_fact:
+    rke2_restart_needed: true
+
+- name: Service (re)started
+  ansible.builtin.set_fact:
+    rke2_restart_needed: false
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  failed_when: false  # LXC containers may have restricted systemd capabilities
+
+- name: Restart RKE2 Server
+  ansible.builtin.systemd:
+    name: rke2-server
+    state: restarted
+    daemon_reload: true
+  failed_when: false  # Allow deployment to continue if restart fails
+
+- name: Restart RKE2 Agent
+  ansible.builtin.systemd:
+    name: rke2-agent
+    state: restarted
+    daemon_reload: true
+  failed_when: false  # Allow deployment to continue if restart fails
+
+- name: Restart containerd
+  ansible.builtin.service:
+    name: containerd
+    state: restarted
+  failed_when: false  # LXC containers may have restricted capabilities

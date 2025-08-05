@@ -1,0 +1,22 @@
+[Service]
+# RKE2 Server configuration for SQLite mode with LXC containers
+# Use proper resource management instead of disabling everything
+Environment="RKE2_DATA_DIR=/var/lib/rancher/rke2"
+Environment="RKE2_CONFIG_FILE=/etc/rancher/rke2/config.yaml"
+
+# LXC-optimized environment settings
+Environment="KUBELET_EXTRA_ARGS=--container-runtime-endpoint=unix:///run/k3s/containerd/containerd.sock"
+
+# SQLite-specific configurations
+Environment="RKE2_DATASTORE_ENDPOINT=sqlite"
+
+# Resource limits optimized for LXC containers
+TasksMax=infinity
+LimitNOFILE=1048576
+LimitNPROC=1048576
+
+# Add essential capabilities for containerized workloads
+Delegate=yes
+
+# Extended timeout for SQLite mode startup
+TimeoutStartSec=600

@@ -1,0 +1,17 @@
+[Service]
+# RKE2 Agent configuration for SQLite mode with LXC containers
+# Use proper resource management instead of disabling everything
+
+# LXC-optimized environment settings
+Environment="KUBELET_EXTRA_ARGS=--container-runtime-endpoint=unix:///run/k3s/containerd/containerd.sock"
+
+# Resource limits optimized for LXC containers
+TasksMax=infinity
+LimitNOFILE=1048576
+LimitNPROC=1048576
+
+# Add essential capabilities for containerized workloads
+Delegate=yes
+
+# Extended timeout for SQLite mode startup
+TimeoutStartSec=600
