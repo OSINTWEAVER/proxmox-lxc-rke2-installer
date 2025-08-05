@@ -60,44 +60,15 @@
     rke2_kubelet_arg:
       - "config=/etc/rancher/rke2/kubelet-config.yaml"
     
-    # RKE2 configuration for LXC - using proper YAML format
-    rke2_kube_apiserver_args:
-      # API server optimizations for LXC
-      - "max-requests-inflight=3000"
-      - "max-mutating-requests-inflight=1000"
-      - "watch-cache-sizes=node#100,pod#1000"
-      - "default-watch-cache-size=100"
-      - "delete-collection-workers=10"
+    # RKE2 configuration for LXC - minimal overrides only
+    rke2_kube_apiserver_args: []
     
-    rke2_kube_controller_manager_arg:
-      # Controller manager optimizations for LXC
-      - "node-cidr-mask-size=24"
-      - "service-cluster-ip-range=10.43.0.0/16"
-      - "cluster-cidr=10.42.0.0/16"
-      - "controllers=*,bootstrapsigner,tokencleaner"
-      # Removed flex-volume-plugin-dir and terminated-pod-gc-threshold to avoid duplicates with RKE2 defaults
-      - "use-service-account-credentials=true"
-      - "concurrent-service-syncs=10"
-      - "concurrent-rc-syncs=10"
-      - "concurrent-namespace-syncs=10"
-      - "concurrent-gc-syncs=30"
-      - "node-monitor-period=5s"
-      - "node-monitor-grace-period=40s"
-      # Removed pod-eviction-timeout=5m - deprecated in Kubernetes 1.33
-      - "concurrent-deployment-syncs=10"
-      - "concurrent-replicaset-syncs=10"
+    rke2_kube_controller_manager_arg: []
     
-    rke2_kube_scheduler_arg:
-      # Scheduler optimizations for LXC
-      - "kube-api-qps=50"
-      - "kube-api-burst=100"
+    rke2_kube_scheduler_arg: []
     
     # ETCD optimizations for LXC (only used when not in SQLite mode)
-    rke2_etcd_args:
-      - "heartbeat-interval=250"
-      - "election-timeout=1250"
-      - "snapshot-count=5000"
-      - "quota-backend-bytes=4294967296"
+    rke2_etcd_args: []
     
     # Basic server configuration
     rke2_node_name: "{{ ansible_default_ipv4.address }}"
