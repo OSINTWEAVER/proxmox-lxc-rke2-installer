@@ -44,6 +44,82 @@
       - LXC Mode: {{ is_lxc_container }}
       - Applying LXC-specific optimizations: {{ is_lxc_container }}
 
+# CRITICAL FIX: Configure AppArmor for LXC container compatibility
+- name: Check AppArmor status in LXC container
+  ansible.builtin.shell: |
+    if command -v aa-status >/dev/null 2>&1; then
+      echo "AppArmor tools available"
+      aa-status 2>/dev/null || echo "AppArmor may be restricted in LXC"
+    else
+      echo "AppArmor tools not found (normal in LXC)"
+    fi
+  register: apparmor_status
+  when: is_lxc_container
+  changed_when: false
+
+- name: Display AppArmor status
+  ansible.builtin.debug:
+    var: apparmor_status.stdout_lines
+  when: is_lxc_container
+
+- name: Create containerd directory for AppArmor configuration
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: is_lxc_container
+
+- name: Configure containerd to disable AppArmor in LXC containers
+  ansible.builtin.copy:
+    content: |
+      version = 2
+
+      [plugins]
+        [plugins."io.containerd.grpc.v1.cri"]
+          # Disable AppArmor in LXC containers to prevent policy conflicts
+          disable_apparmor = true
+          
+          [plugins."io.containerd.grpc.v1.cri".containerd]
+            [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+              [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                runtime_type = "io.containerd.runc.v2"
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                  SystemdCgroup = false
+                  # Disable AppArmor for containers
+                  NoPivotRoot = false
+                  NoNewKeyring = false
+                  ShimCgroup = ""
+    dest: /etc/containerd/config.toml
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  when: is_lxc_container
+
+- name: Create kubelet systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/kubelet.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: is_lxc_container
+
+- name: Configure kubelet to disable AppArmor feature gate (conservative approach)
+  ansible.builtin.copy:
+    content: |
+      [Service]
+      # Only disable AppArmor for containers, not system-wide
+      Environment="KUBELET_EXTRA_ARGS=--feature-gates=AppArmor=false"
+    dest: /etc/systemd/system/kubelet.service.d/10-apparmor-override.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: is_lxc_container
+  notify: "Reload systemd daemon"
+
 # CRITICAL FIX: Create kernel parameter stubs for read-only /proc/sys in LXC
 - name: Create kernel parameter workarounds for LXC containers
   ansible.builtin.shell: |
@@ -122,6 +198,54 @@
 - name: Display kernel parameter check results
   ansible.builtin.debug:
     var: kernel_param_check.stdout_lines
+  when: is_lxc_container
+
+# CRITICAL: Kernel module preparation for RKE2 in LXC
+- name: Check and prepare critical kernel modules for RKE2
+  ansible.builtin.shell: |
+    echo "Checking critical kernel modules for RKE2 in LXC"
+    
+    # Essential modules - overlay is critical for containerd
+    CRITICAL_MODULES="overlay"
+    # br_netfilter can be missing but overlay cannot
+    OPTIONAL_MODULES="br_netfilter"
+    
+    missing_critical=""
+    missing_optional=""
+    
+    for module in $CRITICAL_MODULES; do
+      if ! lsmod | grep -q "^$module "; then
+        missing_critical="$missing_critical $module"
+        echo "CRITICAL: $module module not loaded"
+      else
+        echo "SUCCESS: $module module loaded"
+      fi
+    done
+    
+    for module in $OPTIONAL_MODULES; do
+      if ! lsmod | grep -q "^$module "; then
+        missing_optional="$missing_optional $module"
+        echo "WARNING: $module module not loaded (may be acceptable)"
+      else
+        echo "SUCCESS: $module module loaded"
+      fi
+    done
+    
+    if [ -n "$missing_critical" ]; then
+      echo "ERROR: Critical modules missing:$missing_critical"
+      echo "These must be loaded on the Proxmox host with 'modprobe'"
+      echo "Run on Proxmox host: modprobe overlay"
+      exit 1
+    fi
+    
+    echo "SUCCESS: All critical kernel modules available"
+  register: kernel_module_check
+  when: is_lxc_container
+  failed_when: kernel_module_check.rc != 0
+
+- name: Display kernel module check results
+  ansible.builtin.debug:
+    var: kernel_module_check.stdout_lines
   when: is_lxc_container
 
 # Validate LXC container prerequisites from research
@@ -477,6 +601,40 @@
     recurse: true
   when: is_lxc_container
 
+# CRITICAL FIX: Configure containerd for cgroupfs instead of systemd
+- name: Deploy LXC-optimized containerd configuration
+  ansible.builtin.template:
+    src: containerd-lxc.toml.j2
+    dest: /etc/rancher/rke2/config.toml.tmpl
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  when: is_lxc_container
+
+- name: Create containerd config directory
+  ansible.builtin.file:
+    path: /var/lib/rancher/rke2/agent/etc/containerd
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+    recurse: true
+  when: is_lxc_container
+
+- name: Copy containerd config to RKE2 agent location
+  ansible.builtin.copy:
+    src: /etc/rancher/rke2/config.toml.tmpl
+    dest: /var/lib/rancher/rke2/agent/etc/containerd/config.toml.tmpl
+    owner: root
+    group: root
+    mode: '0644'
+    remote_src: yes
+  when: is_lxc_container
+
+# Note: AppArmor disable is already included in the containerd-lxc.toml.j2 template
+# No need for additional lineinfile modifications
+
 # REMOVED: config-lxc-override.yaml creation - no longer needed
 # All LXC optimizations are now included in the main kubelet-config.yaml template
 # This prevents configuration conflicts and duplicate kubelet-arg entries
@@ -790,6 +948,9 @@
     daemon_reload: true
   when: is_lxc_container
 
+# NOTE: Previous RKE2 v1.30.14+rke2r2 kube-scheduler bind-timeout bug fix removed
+# as this issue is resolved in Kubernetes 1.33 and RKE2 v1.33.3+rke2r1
+
 # Production-grade health check script with comprehensive validation
 - name: Create comprehensive LXC health check script
   ansible.builtin.copy:
@@ -954,6 +1115,12 @@
       
       COMPREHENSIVE LXC-OPTIMIZED RKE2 CONFIGURATION APPLIED
       ======================================================
+      
+      RKE2 VERSION: v1.33.3+rke2r1 (Kubernetes v1.33.3)
+      UPGRADE NOTES:
+      - Upgraded from RKE2 v1.30.14+rke2r2 to resolve kube-scheduler bind-timeout bug
+      - Kubernetes 1.33 includes significant stability and performance improvements
+      - All previous LXC compatibility workarounds retained for maximum stability
       
       ARCHITECTURE OPTIMIZATIONS:
       - Container Type: {{ container_type.stdout }}

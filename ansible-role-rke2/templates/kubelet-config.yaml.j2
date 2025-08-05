@@ -19,7 +19,8 @@ authorization:
   mode: Webhook
 
 # LXC-optimized cgroup and resource management
-cgroupDriver: systemd
+# Use cgroupfs driver instead of systemd to fix runc cgroup path format issues
+cgroupDriver: cgroupfs
 cgroupsPerQOS: false  # Disable QoS cgroups in LXC
 enforceNodeAllocatable: []  # Disable node resource enforcement in LXC
 protectKernelDefaults: false  # Required for LXC containers

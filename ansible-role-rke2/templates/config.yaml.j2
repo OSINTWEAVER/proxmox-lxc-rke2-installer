@@ -88,6 +88,8 @@ kubelet-arg:
   # Essential LXC compatibility settings that prevent strconv.Atoi parsing errors
   - "fail-swap-on=false"
   - "protect-kernel-defaults=false"
+  # Use cgroupfs driver to fix systemd cgroup path format issues in LXC
+  - "cgroup-driver=cgroupfs"
   # Point to custom kubelet configuration file with all LXC optimizations
   - "config=/etc/rancher/rke2/kubelet-config.yaml"
 {% if ( rke2_kube_proxy_arg is defined ) %}

@@ -1,0 +1,43 @@
+# LXC-optimized containerd configuration
+# This template modifies RKE2's embedded containerd to use cgroupfs instead of systemd cgroups
+# and disables AppArmor to resolve compatibility issues in LXC containers
+
+version = 2
+
+[plugins]
+  [plugins."io.containerd.grpc.v1.cri"]
+    # Disable AppArmor in LXC containers to prevent policy conflicts
+    disable_apparmor = true
+    
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            # Disable systemd cgroup management to fix LXC compatibility
+            SystemdCgroup = false
+            # Use cgroupfs driver instead
+            BinaryName = "runc"
+            # Disable AppArmor for containers
+            NoPivotRoot = false
+            NoNewKeyring = false
+            ShimCgroup = ""
+        
+        # NVIDIA runtime configuration for GPU support (if needed)
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+          privileged_without_host_devices = false
+          runtime_engine = ""
+          runtime_root = ""
+          runtime_type = "io.containerd.runc.v2"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+            BinaryName = "/usr/bin/nvidia-container-runtime"
+            SystemdCgroup = false
+    
+    [plugins."io.containerd.grpc.v1.cri".cni]
+      bin_dir = "/opt/cni/bin"
+      conf_dir = "/etc/cni/net.d"
+    
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+        [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+          endpoint = ["https://registry-1.docker.io"]

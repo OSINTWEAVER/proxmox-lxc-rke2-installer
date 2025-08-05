@@ -2,8 +2,8 @@
   hosts: all
   become: true
   vars:
-    # Uncomment and set if needed:
-    # rke2_version: "v1.30.6+rke2r1"
+    # RKE2 version - Updated to v1.33.3+rke2r1 for Kubernetes 1.33 with upstream bug fixes
+    rke2_version: "v1.33.3+rke2r1"
     # lb ip  
     # rke2_api_ip: "10.14.100.1"
 
