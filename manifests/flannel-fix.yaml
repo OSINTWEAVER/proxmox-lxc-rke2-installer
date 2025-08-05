@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rke2-flannel-config
+  namespace: kube-system
+data:
+  flannel-daemonset-patch.yaml: |
+    spec:
+      template:
+        spec:
+          tolerations:
+          - effect: NoExecute
+            key: CriticalAddonsOnly
+            operator: Exists
+          - effect: NoSchedule
+            key: node.kubernetes.io/not-ready
+            operator: Exists
+          - effect: NoSchedule
+            key: node-role.kubernetes.io/control-plane
+            operator: Exists
+          - effect: NoSchedule
+            key: node.cloudprovider.kubernetes.io/uninitialized
+            operator: Exists
+            value: "true"
+          - effect: NoExecute
+            key: node-role.kubernetes.io/etcd
+            operator: Exists
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: patch-flannel-daemonset
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      serviceAccountName: default
+      tolerations:
+      - effect: NoExecute
+        key: CriticalAddonsOnly
+        operator: Exists
+      containers:
+      - name: patch-flannel
+        image: rancher/kubectl:v1.29.1
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Waiting for flannel daemonset to be created..."
+          while ! kubectl get daemonset kube-flannel-ds -n kube-system >/dev/null 2>&1; do
+            echo "Waiting for flannel daemonset..."
+            sleep 5
+          done
+          
+          echo "Patching flannel daemonset with CriticalAddonsOnly toleration..."
+          kubectl patch daemonset kube-flannel-ds -n kube-system --patch-file /patch/flannel-daemonset-patch.yaml
+          
+          echo "Removing problematic node taints..."
+          kubectl taint node --all node.kubernetes.io/not-ready:NoSchedule- || true
+          kubectl taint node --all node.cloudprovider.kubernetes.io/uninitialized:NoSchedule- || true
+          
+          echo "Flannel daemonset patched successfully"
+        volumeMounts:
+        - name: patch-config
+          mountPath: /patch
+      volumes:
+      - name: patch-config
+        configMap:
+          name: rke2-flannel-config
+      restartPolicy: OnFailure
+  backoffLimit: 5

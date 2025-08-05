@@ -24,8 +24,9 @@
         + ( [ playbook_dir + '/../manifests/rke2-nvidia.yaml' ] if has_gpu_nodes else [] )
       }}
 
-    rke2_server_node_taints:
-      - 'CriticalAddonsOnly=true:NoExecute'
+    # Removed CriticalAddonsOnly taint as it prevents CNI daemonsets from scheduling
+    # rke2_server_node_taints:
+    #   - 'CriticalAddonsOnly=true:NoExecute'
 
     rke2_download_kubeconf: true
     rke2_download_kubeconf_path: "{{ playbook_dir }}/../kubeconfs"
@@ -183,10 +184,9 @@
     # Note: User creation must be done manually via pct exec before running Ansible
     # since Ansible needs SSH access which requires the user to exist first
     
-    - name: Update apt cache and upgrade packages
+    - name: Update apt cache
       apt:
         update_cache: yes
-        upgrade: full
         force_apt_get: yes
         cache_valid_time: 3600
 
@@ -204,9 +204,6 @@
           - software-properties-common
           - p7zip-full
           - git
-          - python3
-          - python3-pip
-          - python3-venv
         state: present
         force_apt_get: yes
 
@@ -484,9 +481,6 @@
 
     - name: Update apt repo and cache on all boxes
       apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
-
-    - name: Upgrade all packages on servers
-      apt: upgrade=dist force_apt_get=yes
 
     - name: Get kernel version
       shell: uname -r
