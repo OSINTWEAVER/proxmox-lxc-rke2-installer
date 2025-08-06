@@ -1,0 +1,270 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: funny-webapp-config
+  namespace: default
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🚀 RKE2 LXC Cluster - It's Alive!</title>
+        <style>
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                margin: 0;
+                padding: 20px;
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                color: white;
+                text-align: center;
+            }
+            .container {
+                background: rgba(255, 255, 255, 0.1);
+                backdrop-filter: blur(10px);
+                border-radius: 20px;
+                padding: 40px;
+                box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                max-width: 800px;
+                animation: fadeInUp 1s ease-out;
+            }
+            h1 {
+                font-size: 3em;
+                margin-bottom: 20px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                animation: bounce 2s infinite;
+            }
+            .emoji {
+                font-size: 4em;
+                animation: spin 3s linear infinite;
+            }
+            .cluster-info {
+                background: rgba(0, 0, 0, 0.2);
+                border-radius: 10px;
+                padding: 20px;
+                margin: 20px 0;
+                text-align: left;
+            }
+            .gpu-section {
+                background: linear-gradient(45deg, #ff6b6b, #feca57);
+                color: #333;
+                border-radius: 15px;
+                padding: 20px;
+                margin: 20px 0;
+                font-weight: bold;
+            }
+            .blink {
+                animation: blink 1.5s infinite;
+            }
+            @keyframes fadeInUp {
+                from { opacity: 0; transform: translateY(30px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            @keyframes bounce {
+                0%, 20%, 50%, 80%, 100% { transform: translateY(0); }
+                40% { transform: translateY(-10px); }
+                60% { transform: translateY(-5px); }
+            }
+            @keyframes spin {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+            }
+            @keyframes blink {
+                0%, 50% { opacity: 1; }
+                51%, 100% { opacity: 0.3; }
+            }
+            .tech-stack {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
+                margin: 20px 0;
+            }
+            .tech-item {
+                background: rgba(255, 255, 255, 0.2);
+                padding: 15px;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            .footer {
+                margin-top: 30px;
+                font-size: 0.9em;
+                opacity: 0.8;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="emoji">🎉</div>
+            <h1>Congratulations! Your RKE2 Cluster is <span class="blink">WORKING!</span></h1>
+            
+            <div class="cluster-info">
+                <h2>🏗️ Cluster Architecture</h2>
+                <p><strong>🐳 Container Runtime:</strong> RKE2 Embedded Containerd (Docker-free!)</p>
+                <p><strong>🕸️ CNI:</strong> Flannel (LXC Optimized)</p>
+                <p><strong>🗃️ Datastore:</strong> SQLite (Lightweight & Fast)</p>
+                <p><strong>📦 Virtualization:</strong> Proxmox LXC Containers</p>
+                <p><strong>🚀 Kubernetes:</strong> v1.33.3 (Latest & Greatest)</p>
+                <p><strong>⚡ Deployment Time:</strong> <span id="currentTime"></span></p>
+            </div>
+
+            <div class="gpu-section">
+                <h2>🎮 GPU Powerhouse Status</h2>
+                <p>✅ NVIDIA Container Toolkit: Ready for AI/ML workloads!</p>
+                <p>✅ RTX 4070 SUPER: Double the graphics power!</p>
+                <p>✅ LXC GPU Passthrough: Near-native performance!</p>
+                <p>🧠 Ready for: TensorFlow, PyTorch, CUDA workloads, and more!</p>
+            </div>
+
+            <div class="tech-stack">
+                <div class="tech-item">🔧 Ansible Automated</div>
+                <div class="tech-item">🏺 Local Path Storage</div>
+                <div class="tech-item">🛡️ Security Hardened</div>
+                <div class="tech-item">📊 Metrics Ready</div>
+                <div class="tech-item">🎯 LoadBalancer Ready</div>
+                <div class="tech-item">🔍 Monitoring Ready</div>
+            </div>
+
+            <div class="cluster-info">
+                <h2>🎯 What's Next?</h2>
+                <p>🚀 Deploy your applications with <code>kubectl</code></p>
+                <p>📈 Install monitoring with <code>helm</code></p>
+                <p>🎮 Run GPU workloads for AI/ML</p>
+                <p>🔍 Explore with <code>k9s</code> for interactive management</p>
+                <p>📊 Test storage with PersistentVolumeClaims</p>
+            </div>
+
+            <div class="footer">
+                <p>🎉 <strong>Deployed by:</strong> Proxmox LXC RKE2 Installer</p>
+                <p>⚡ <strong>Powered by:</strong> Ubuntu 24.04 LTS in LXC Containers</p>
+                <p>🏆 <strong>Achievement Unlocked:</strong> Kubernetes Master! 🏆</p>
+            </div>
+        </div>
+
+        <script>
+            // Update current time
+            document.getElementById('currentTime').textContent = new Date().toLocaleString();
+            
+            // Add some fun interactions
+            document.addEventListener('click', function(e) {
+                const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#feca57', '#ff9ff3'];
+                const randomColor = colors[Math.floor(Math.random() * colors.length)];
+                document.body.style.background = `linear-gradient(135deg, ${randomColor} 0%, #764ba2 100%)`;
+            });
+
+            // Konami code easter egg
+            let konamiCode = [];
+            const konamiSequence = [38, 38, 40, 40, 37, 39, 37, 39, 66, 65]; // ↑↑↓↓←→←→BA
+            
+            document.addEventListener('keydown', function(e) {
+                konamiCode.push(e.keyCode);
+                if (konamiCode.length > konamiSequence.length) {
+                    konamiCode.shift();
+                }
+                if (konamiCode.join(',') === konamiSequence.join(',')) {
+                    alert('🎉 KONAMI CODE ACTIVATED! 🚀 You are a true cluster master! 🏆');
+                    document.querySelector('.emoji').textContent = '🚀';
+                    document.body.style.background = 'linear-gradient(45deg, #ff0000, #00ff00, #0000ff, #ffff00, #ff00ff, #00ffff)';
+                    document.body.style.backgroundSize = '400% 400%';
+                    document.body.style.animation = 'gradient 2s ease infinite';
+                }
+            });
+        </script>
+        
+        <style>
+            @keyframes gradient {
+                0% { background-position: 0% 50%; }
+                50% { background-position: 100% 50%; }
+                100% { background-position: 0% 50%; }
+            }
+        </style>
+    </body>
+    </html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: funny-webapp
+  namespace: default
+  labels:
+    app: funny-webapp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: funny-webapp
+  template:
+    metadata:
+      labels:
+        app: funny-webapp
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: webapp-content
+          mountPath: /usr/share/nginx/html
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+      volumes:
+      - name: webapp-content
+        configMap:
+          name: funny-webapp-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: funny-webapp-service
+  namespace: default
+spec:
+  selector:
+    app: funny-webapp
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30080
+  type: NodePort
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: funny-webapp-ingress
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: rke2-cluster.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: funny-webapp-service
+            port:
+              number: 80
+  - host: cluster-test.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: funny-webapp-service
+            port:
+              number: 80
