@@ -222,6 +222,14 @@
     # ===== KUBERNETES TOOLS INSTALLATION =====
     # Install kubectl, helm, and k9s for cluster management
 
+    - name: Create Ansible remote temp directory with correct permissions
+      file:
+        path: /root/.ansible/tmp
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
     - name: Download and install kubectl (same version as RKE2)
       get_url:
         url: "https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl"
@@ -477,14 +485,12 @@
     #  shell: "hwclock --localtime --systohc"
 
     # Add this before the sysctl tasks
-    - name: Load required kernel modules (ignore failures for LXC containers)
+    - name: Load required kernel modules
       community.general.modprobe:
         name: "{{ item }}"
         state: present
       with_items:
-        - br_netfilter
         - overlay
-      ignore_errors: true
 
     # Check if we're running in an LXC container
     - name: Check if running in LXC container
@@ -583,25 +589,6 @@
         reload: yes
         ignoreerrors: yes
 
-    # LXC containers may have restricted access to certain kernel parameters
-    - name: "Set net.bridge.bridge-nf-call-iptables (ignore errors for LXC)"
-      sysctl:
-        name: net.bridge.bridge-nf-call-iptables
-        value: '1'
-        sysctl_set: yes
-        state: present
-        reload: yes
-        ignoreerrors: yes
-
-    - name: "Set net.bridge.bridge-nf-call-ip6tables (ignore errors for LXC)"
-      sysctl:
-        name: net.bridge.bridge-nf-call-ip6tables
-        value: '1'
-        sysctl_set: yes
-        state: present
-        reload: yes
-        ignoreerrors: yes
-
     - name: "Set net.ipv4.ip_forward"
       sysctl:
         name: net.ipv4.ip_forward
@@ -609,7 +596,6 @@
         sysctl_set: yes
         state: present
         reload: yes
-        ignoreerrors: yes
 
     - name: Add or modify hard nofile limits for wildcard domain
       community.general.pam_limits:
@@ -646,15 +632,6 @@
         - net-tools
         - dnsutils
         - jq
-
-    - name: Install linux headers (skip for LXC containers)
-      apt:
-        update_cache: true
-        pkg:
-        - linux-headers-generic
-        - linux-headers-{{ kernel_version.stdout }}
-      when: container_type.stdout != 'lxc'
-      ignore_errors: true
 
     - name: Get DEB architecture
       shell: dpkg --print-architecture
@@ -1188,6 +1165,6 @@
       delegate_to: localhost
 
   roles:
-    - role: rke2
+    - role: ../ansible-role-rke2
       vars:
         k8s_cluster: "{{ groups['rke2_cluster'] | default(groups['all']) }}"
