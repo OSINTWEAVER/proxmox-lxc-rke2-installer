@@ -648,35 +648,36 @@
 
 # Install NVIDIA Container Toolkit for LXC environments
 # GPU Operator has limitations in LXC, so we install toolkit directly
+# Only run on nodes explicitly marked as GPU nodes
 - name: Install NVIDIA Container Toolkit for GPU nodes
   ansible.builtin.shell: |
-    if find /dev -name "nvidia*" -type c 2>/dev/null | grep -q nvidia; then
-      echo "INSTALLING NVIDIA CONTAINER TOOLKIT FOR LXC"
-      
-      # Add NVIDIA Container Toolkit repository
-      curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-      curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-      
-      # Update package list and install
-      apt-get update
-      apt-get install -y nvidia-container-toolkit
-      
-      # Verify nvidia-container-runtime is available
-      if command -v nvidia-container-runtime >/dev/null 2>&1; then
-        echo "SUCCESS: nvidia-container-runtime is available"
-        echo "NOTE: containerd configuration includes nvidia runtime for LXC compatibility"
-      else
-        echo "WARNING: nvidia-container-runtime not found after installation"
-      fi
-      
-      echo "SUCCESS: NVIDIA Container Toolkit installed for LXC"
+    echo "INSTALLING NVIDIA CONTAINER TOOLKIT FOR LXC"
+    
+    # Add NVIDIA Container Toolkit repository
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+      sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+      tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    
+    # Update package list and install
+    apt-get update
+    apt-get install -y nvidia-container-toolkit
+    
+    # Verify nvidia-container-runtime is available
+    if command -v nvidia-container-runtime >/dev/null 2>&1; then
+      echo "SUCCESS: nvidia-container-runtime is available"
+      echo "NOTE: containerd configuration includes nvidia runtime for LXC compatibility"
     else
-      echo "INFO: No NVIDIA devices detected, skipping toolkit installation"
+      echo "WARNING: nvidia-container-runtime not found after installation"
     fi
+    
+    echo "SUCCESS: NVIDIA Container Toolkit installed for LXC"
   register: nvidia_toolkit_install
   changed_when: "'SUCCESS' in nvidia_toolkit_install.stdout"
+  when: >
+    (inventory_hostname in groups.get('gpu_nodes', [])) or 
+    (is_gpu_node | default(false)) or
+    (ansible_hostname | regex_search(gpu_node_pattern | default('gpu')))
 
 - name: Display GPU setup results
   ansible.builtin.debug:
