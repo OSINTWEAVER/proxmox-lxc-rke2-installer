@@ -341,32 +341,22 @@
     group: root
     mode: 0644
 
-- name: Apply comprehensive LXC sysctl settings
-  ansible.builtin.shell: |
-    echo "Applying sysctl configuration for LXC containers..."
-    
-    # Apply all settings, but ignore failures for LXC-incompatible parameters
-    sysctl -p /etc/sysctl.d/99-rke2-lxc.conf 2>&1 | while IFS= read -r line; do
-      if echo "$line" | grep -E "(Operation not permitted|No such file or directory)" >/dev/null; then
-        # Log LXC-expected failures but don't treat as errors
-        echo "LXC SKIP: $line"
-      else
-        echo "$line"
-      fi
-    done
-    
-    echo "Sysctl configuration completed (LXC-incompatible parameters skipped)"
+- name: Apply LXC sysctl configuration with error tolerance
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/99-rke2-lxc.conf
   register: sysctl_result
   failed_when: false
+  changed_when: sysctl_result.rc == 0
 
-- name: Display sysctl application results
+- name: Display sysctl results
   ansible.builtin.debug:
     msg: |
-      Sysctl configuration applied with results:
-      {{ sysctl_result.stdout if sysctl_result.stdout else 'Applied successfully' }}
+      Sysctl configuration applied:
+      Return code: {{ sysctl_result.rc }}
+      {% if sysctl_result.stdout %}
+      Output: {{ sysctl_result.stdout }}
+      {% endif %}
       {% if sysctl_result.stderr %}
-      Warnings/Errors:
-      {{ sysctl_result.stderr }}
+      Warnings (normal in LXC): {{ sysctl_result.stderr }}
       {% endif %}
 
 # Create /dev/kmsg for kubelet
@@ -542,49 +532,6 @@
     group: root
     mode: 0600
   when: config_file_check.stat.exists
-
-- name: Verify RKE2 configuration contains LXC fixes
-  ansible.builtin.shell: |
-    echo "Verifying RKE2 configuration for LXC compatibility..."
-    
-    if [ -f /etc/rancher/rke2/config.yaml ]; then
-      echo "=== CURRENT RKE2 CONFIG ==="
-      cat /etc/rancher/rke2/config.yaml
-      echo ""
-      echo "=== VERIFICATION ==="
-      
-      if grep -q "config=/etc/rancher/rke2/kubelet-config.yaml" /etc/rancher/rke2/config.yaml; then
-        echo "✅ kubelet-config.yaml reference: FOUND"
-      else
-        echo "❌ kubelet-config.yaml reference: MISSING"
-      fi
-      
-      if grep -q "disable-etcd.*true" /etc/rancher/rke2/config.yaml; then
-        echo "✅ SQLite mode (disable-etcd): DETECTED"
-        echo "   Skipping etcd-specific checks for SQLite mode"
-      else
-        echo "ℹ️  etcd mode: DETECTED"
-        if grep -q "protect-kernel-defaults=false" /etc/rancher/rke2/config.yaml; then
-          echo "✅ protect-kernel-defaults=false: FOUND"
-        else
-          echo "❌ protect-kernel-defaults=false: MISSING"
-        fi
-      fi
-      
-      if grep -q "fail-swap-on=false" /etc/rancher/rke2/config.yaml; then
-        echo "✅ fail-swap-on=false: FOUND"  
-      else
-        echo "❌ fail-swap-on=false: MISSING"
-      fi
-    else
-      echo "❌ ERROR: /etc/rancher/rke2/config.yaml not found!"
-    fi
-  register: config_verification
-  changed_when: false
-
-- name: Display config verification results
-  ansible.builtin.debug:
-    var: config_verification.stdout_lines
 
 - name: Reload systemd daemon for LXC service files
   ansible.builtin.systemd:
@@ -966,23 +913,11 @@
       
       Ready for RKE2 deployment!
 
-# NVIDIA GPU Validation Check (runs after RKE2 setup)
+# NVIDIA GPU Validation Check (runs after RKE2 setup) - Only on explicitly configured GPU nodes
 - name: Comprehensive NVIDIA GPU and Container Runtime Validation
   ansible.builtin.shell: |
     echo "NVIDIA GPU AND CONTAINER RUNTIME VALIDATION"
     echo "==========================================="
-    
-    # Check if this is a GPU node (LXC-friendly detection)
-    if ! (find /dev -name "nvidia*" -type c 2>/dev/null | grep -q nvidia) && \
-       ! (lspci 2>/dev/null | grep -i nvidia) && \
-       ! (ls /proc/driver/nvidia/gpus/ 2>/dev/null | grep -q .); then
-      echo "INFO: No NVIDIA devices detected - skipping GPU validation"
-      echo "  (Checked /dev/nvidia*, lspci, and /proc/driver/nvidia/)"
-      exit 0
-    fi
-    
-    echo "✓ NVIDIA devices detected - proceeding with validation"
-    echo ""
     
     # 1. Basic NVIDIA driver validation
     echo "1. NVIDIA Driver Validation:"
@@ -1088,11 +1023,15 @@
     
   register: nvidia_validation_result
   changed_when: false
-  when: has_nvidia_devices | default(false)
+  when: >
+    (inventory_hostname in groups.get('gpu_nodes', [])) or 
+    (is_gpu_node | default(false)) or
+    (ansible_hostname | regex_search(gpu_node_pattern | default('gpu')))
 
 - name: Display NVIDIA validation results
   ansible.builtin.debug:
     var: nvidia_validation_result.stdout_lines
-  when: 
-    - nvidia_validation_result is defined
-    - has_nvidia_devices | default(false)
+  when: >
+    (inventory_hostname in groups.get('gpu_nodes', [])) or 
+    (is_gpu_node | default(false)) or
+    (ansible_hostname | regex_search(gpu_node_pattern | default('gpu')))
