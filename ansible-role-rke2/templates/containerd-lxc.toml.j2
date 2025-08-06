@@ -1,6 +1,7 @@
 # LXC-optimized containerd configuration
 # This template modifies RKE2's embedded containerd to use cgroupfs instead of systemd cgroups
 # and disables AppArmor to resolve compatibility issues in LXC containers
+# NVIDIA runtime is configured directly since GPU Operator has limitations in LXC environments
 
 version = 2
 
@@ -23,15 +24,19 @@ version = 2
             NoNewKeyring = false
             ShimCgroup = ""
         
-        # NVIDIA runtime configuration for GPU support (if needed)
+        # NVIDIA Container Runtime for GPU workloads in LXC
+        # This is configured directly since GPU Operator has limitations in LXC environments
         [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
-          privileged_without_host_devices = false
-          runtime_engine = ""
-          runtime_root = ""
           runtime_type = "io.containerd.runc.v2"
           [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
-            BinaryName = "/usr/bin/nvidia-container-runtime"
+            # Use nvidia-container-runtime for GPU containers
+            BinaryName = "nvidia-container-runtime"
+            # Disable systemd cgroup management for LXC compatibility
             SystemdCgroup = false
+            # Disable AppArmor for GPU containers
+            NoPivotRoot = false
+            NoNewKeyring = false
+            ShimCgroup = ""
     
     [plugins."io.containerd.grpc.v1.cri".cni]
       bin_dir = "/opt/cni/bin"

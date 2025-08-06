@@ -21,7 +21,6 @@
     rke2_custom_manifests: >-
       {{
         ( [ playbook_dir + '/../manifests/local-path-provisioner.yaml' ] if use_local_path_provisioner else [] )
-        + ( [ playbook_dir + '/../manifests/rke2-nvidia.yaml' ] if has_gpu_nodes else [] )
       }}
 
     # Removed CriticalAddonsOnly taint as it prevents CNI daemonsets from scheduling
@@ -425,31 +424,9 @@
         msg: "NVIDIA driver test: {{ 'PASSED' if nvidia_test.rc == 0 else 'FAILED' }}"
       when: is_gpu_node and nvidia_test is defined
 
-    - name: Install NVIDIA Container Toolkit GPG key (GPU nodes only)
-      shell: |
-        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
-
-    - name: Add NVIDIA Container Toolkit repository (GPU nodes only)
-      shell: |
-        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
-
-    - name: Install NVIDIA Container Toolkit (GPU nodes only)
-      apt:
-        name: nvidia-container-toolkit
-        state: present
-        update_cache: yes
-      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
-
-    - name: Configure NVIDIA Container Toolkit for RKE2's containerd (GPU nodes only)
-      shell: |
-        nvidia-ctk runtime configure --runtime=containerd --config=/var/lib/rancher/rke2/agent/etc/containerd/config.toml.tmpl
-        mkdir -p /etc/nvidia-container-runtime
-        nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place
-      when: is_gpu_node and nvidia_test is defined and nvidia_test.rc == 0
-
     # ===== END AUTOMATED CONTAINER SETUP TASKS =====
+    # NOTE: NVIDIA Container Toolkit installation moved to ansible-role-rke2/tasks/lxc_fixes.yml
+    # This ensures proper integration with RKE2's embedded containerd configuration
 
     - name: Check if the NetworkManager directory exists
       ansible.builtin.stat:
@@ -1090,7 +1067,7 @@
         echo "✓ Local Path Provisioner: Ready"
         {% endif %}
         {% if has_gpu_nodes %}
-        echo "✓ NVIDIA GPU Operator: Deployed"
+        echo "✓ NVIDIA Container Toolkit: Configured for GPU workloads"
         {% endif %}
       when: rke2_type == 'server'
       register: cluster_info
@@ -1158,8 +1135,8 @@
           
           ### GPU Support
           {% if has_gpu_nodes %}
-          - **NVIDIA GPU Operator**: Deployed for GPU workloads
-          - **Container Toolkit**: Configured for RKE2's containerd
+          - **NVIDIA Container Toolkit**: Directly configured in containerd for LXC compatibility
+          - **NVIDIA Runtime**: Available for GPU workloads without operator complexity
           {% endif %}
           
           ## Management Commands
@@ -1203,7 +1180,7 @@
           - ✅ **Local Path Provisioner**: Ready for storage
           {% endif %}
           {% if has_gpu_nodes %}
-          - ✅ **NVIDIA Container Toolkit**: GPU workloads ready
+          - ✅ **NVIDIA Container Toolkit**: Handled by RKE2 role for GPU workloads
           {% endif %}
         dest: "{{ playbook_dir }}/../cluster-access-info.md"
         mode: '0644'

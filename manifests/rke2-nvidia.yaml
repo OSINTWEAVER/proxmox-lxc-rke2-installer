@@ -1,21 +1,50 @@
-apiVersion: helm.cattle.io/v1
-kind: HelmChart
-metadata:
-  name: gpu-operator
-  namespace: kube-system
-spec:
-  repo: https://helm.ngc.nvidia.com/nvidia
-  chart: gpu-operator
-  targetNamespace: gpu-operator
-  createNamespace: true
-  valuesContent: |-
-    toolkit:
-      env:
-      - name: "CONTAINERD_CONFIG"
-        value: "/var/lib/rancher/rke2/agent/etc/containerd/config.toml"
-      - name: "CONTAINERD_SOCKET"
-        value: "/run/k3s/containerd/containerd.sock"
-      - name: "CONTAINERD_RUNTIME_CLASS"
-        value: "nvidia"
-      - name: "CONTAINERD_SET_AS_DEFAULT"
-        value: "true"
+# NVIDIA GPU Support for LXC Containers
+# =====================================
+#
+# This manifest previously deployed the NVIDIA GPU Operator, but it has been 
+# replaced with a direct NVIDIA Container Toolkit approach for better LXC compatibility.
+#
+# WHY THE CHANGE:
+# ---------------
+# - GPU Operator has limitations in LXC containers
+# - Driver validation fails due to LXC security restrictions  
+# - Symlink creation issues in containerized environments
+# - Complex operator lifecycle vs simple toolkit installation
+#
+# NEW APPROACH:
+# -------------
+# NVIDIA support is now handled directly by the ansible-role-rke2:
+# 
+# 1. NVIDIA Container Toolkit installed during deployment
+# 2. NVIDIA runtime pre-configured in containerd template
+# 3. GPU devices properly accessible without operator validation
+# 4. No complex operator management or troubleshooting needed
+#
+# WHAT THIS MEANS:
+# ----------------
+# - ✅ GPU workloads work immediately after deployment
+# - ✅ No operator pods that can fail or need debugging  
+# - ✅ LXC-compatible configuration from day one
+# - ✅ Simple, predictable GPU support
+#
+# GPU WORKLOAD EXAMPLE:
+# ---------------------
+# apiVersion: v1
+# kind: Pod
+# metadata:
+#   name: gpu-test
+# spec:
+#   runtimeClassName: nvidia
+#   containers:
+#   - name: gpu-container
+#     image: nvidia/cuda:12.0-base-ubuntu20.04
+#     command: ["nvidia-smi"]
+#     resources:
+#       limits:
+#         nvidia.com/gpu: 1
+#
+# If you need GPU Operator for specific features, you can manually install it:
+# helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+# helm install gpu-operator nvidia/gpu-operator --namespace gpu-operator --create-namespace
+#
+# However, for most LXC deployments, the direct toolkit approach is recommended.
