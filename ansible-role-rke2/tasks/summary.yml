@@ -42,26 +42,23 @@
     # Label GPU nodes for proper scheduling after cluster is ready
     - name: Label GPU nodes for Kubernetes scheduling
       ansible.builtin.shell: |
-        # Label GPU nodes based on inventory configuration
-        {% for host in groups.get('gpu_nodes', []) %}
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes {{ hostvars[host].ansible_hostname | default(host) }} node-type=gpu-worker --overwrite
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes {{ hostvars[host].ansible_hostname | default(host) }} nvidia.com/gpu.present=true --overwrite
-        echo "SUCCESS: GPU node {{ hostvars[host].ansible_hostname | default(host) }} labeled for GPU workloads"
-        {% endfor %}
+        echo "Labeling GPU nodes for proper scheduling..."
         
-        # Also label any nodes with is_gpu_node=true
-        {% for host in groups['all'] %}
-        {% if hostvars[host].get('is_gpu_node', false) %}
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes {{ hostvars[host].ansible_hostname | default(host) }} node-type=gpu-worker --overwrite
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes {{ hostvars[host].ansible_hostname | default(host) }} nvidia.com/gpu.present=true --overwrite
-        echo "SUCCESS: GPU node {{ hostvars[host].ansible_hostname | default(host) }} labeled for GPU workloads"
-        {% endif %}
-        {% endfor %}
+        # Label node 10.14.100.2 as GPU worker
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes 10.14.100.2 node-type=gpu-worker --overwrite
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes 10.14.100.2 nvidia.com/gpu.present=true --overwrite
+        echo "SUCCESS: GPU node 10.14.100.2 labeled for GPU workloads"
+        
+        # Label node 10.14.100.3 as GPU worker  
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes 10.14.100.3 node-type=gpu-worker --overwrite
+        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml label nodes 10.14.100.3 nvidia.com/gpu.present=true --overwrite
+        echo "SUCCESS: GPU node 10.14.100.3 labeled for GPU workloads"
+        
+        echo "GPU node labeling completed"
       args:
         executable: /bin/bash
       register: gpu_labeling_result
       changed_when: "'SUCCESS' in gpu_labeling_result.stdout"
-      when: groups.get('gpu_nodes', []) | length > 0 or (groups['all'] | selectattr('is_gpu_node', 'defined') | selectattr('is_gpu_node') | list | length > 0)
 
     - name: Display GPU node labeling results
       ansible.builtin.debug:

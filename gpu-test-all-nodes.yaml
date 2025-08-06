@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gpu-test-all-nodes
+  labels:
+    app: gpu-test
+spec:
+  selector:
+    matchLabels:
+      app: gpu-test
+  template:
+    metadata:
+      labels:
+        app: gpu-test
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        node-type: gpu-worker
+      containers:
+      - name: gpu-test
+        image: nvidia/cuda:12.9.1-base-ubuntu24.04
+        command: ["/bin/bash"]
+        args:
+        - -c
+        - |
+          echo "🚀 GPU Test Pod Starting on: $(hostname)"
+          echo "===========================================" 
+          echo "Timestamp: $(date)"
+          echo "Node IP: $(hostname -I)"
+          echo ""
+          
+          echo "📋 NVIDIA System Information:"
+          echo "-----------------------------"
+          if command -v nvidia-smi >/dev/null 2>&1; then
+            echo "✅ nvidia-smi found - GPU detection successful!"
+            echo ""
+            nvidia-smi
+            echo ""
+            echo "🎯 Detailed GPU Information:"
+            echo "----------------------------"
+            nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used,memory.free,temperature.gpu,power.draw --format=csv,noheader,nounits
+            echo ""
+            echo "🔧 CUDA Runtime Information:"
+            echo "----------------------------"
+            nvcc --version 2>/dev/null || echo "NVCC not available (expected for runtime image)"
+          else
+            echo "❌ nvidia-smi not available on $(hostname)"
+            echo "   Checking for NVIDIA devices..."
+            ls -la /dev/nvidia* 2>/dev/null || echo "   No NVIDIA devices found"
+            echo "   This indicates GPU passthrough may not be configured for this LXC container"
+          fi
+          
+          echo ""
+          echo "🏁 GPU test completed on $(hostname) at $(date)"
+          echo "Keeping container alive for log inspection..."
+          
+          # Keep alive for inspection
+          while true; do
+            sleep 300
+            echo "$(date): GPU test pod still running on $(hostname)"
+          done
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      terminationGracePeriodSeconds: 10
+      restartPolicy: Always
