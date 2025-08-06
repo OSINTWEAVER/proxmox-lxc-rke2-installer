@@ -4,8 +4,8 @@
   vars:
     # RKE2 version - Updated to v1.33.3+rke2r1 for Kubernetes 1.33 with upstream bug fixes
     rke2_version: "v1.33.3+rke2r1"
-    # lb ip  
-    # rke2_api_ip: "10.14.100.1"
+    # Load balancer IP (configured in inventory file as rke2_api_ip)
+    # Example: rke2_api_ip: "10.14.100.1"
 
     # Create a mapping for Ansible rke2 role that expects k8s_cluster
     k8s_cluster: "{{ groups['rke2_cluster'] | default([]) }}"
@@ -203,6 +203,8 @@
           - curl
           - vim
           - gnupg
+          - gnupg-agent
+          - apt-transport-https
           - lsb-release
           - unzip
           - sudo
@@ -218,6 +220,19 @@
         path: /etc/apt/keyrings
         state: directory
         mode: '0755'
+
+    # Add Docker GPG key and repository (even though we won't install Docker)
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+      args:
+        creates: /etc/apt/trusted.gpg.d/docker.gpg
+
+    - name: Add Docker stable repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        state: present
+        update_cache: yes
 
     # ===== KUBERNETES TOOLS INSTALLATION =====
     # Install kubectl, helm, and k9s for cluster management
@@ -310,30 +325,39 @@
         owner: root
         group: root
 
-    - name: Create kubeconfig directory for adm4n user
+    - name: Create kubeconfig directory for {{ cluster_admin_user }} user
       file:
-        path: /home/adm4n/.kube
+        path: /home/{{ cluster_admin_user }}/.kube
         state: directory
-        owner: adm4n
-        group: adm4n
+        owner: "{{ cluster_admin_user }}"
+        group: "{{ cluster_admin_user }}"
         mode: '0700'
-      when: ansible_user_id == 'adm4n' or 'adm4n' in ansible_all_ipv4_addresses
+      when: cluster_admin_user is defined
 
-    - name: Set up kubectl aliases for adm4n user
+    - name: Set up kubectl aliases for {{ cluster_admin_user }} user
       lineinfile:
-        path: /home/adm4n/.bashrc
+        path: /home/{{ cluster_admin_user }}/.bashrc
         line: "{{ item }}"
         create: yes
-        owner: adm4n
-        group: adm4n
+        owner: "{{ cluster_admin_user }}"
+        group: "{{ cluster_admin_user }}"
       loop:
         - "# Kubernetes tools aliases"
-        - "alias kubectl='sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/kubectl'"
-        - "alias helm='sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/helm'"
-        - "alias k9s='sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/k9s'"
+        - "alias kubectl='/usr/local/bin/kubectl'"
+        - "alias helm='/usr/local/bin/helm'"
+        - "alias k9s='/usr/local/bin/k9s'"
         - "alias k='kubectl'"
         - "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
-      when: ansible_user_id == 'adm4n' or 'adm4n' in ansible_all_ipv4_addresses
+      when: cluster_admin_user is defined
+
+    - name: Add KUBECONFIG to {{ cluster_admin_user }} profile for persistent login
+      ansible.builtin.lineinfile:
+        path: /home/{{ cluster_admin_user }}/.profile
+        line: "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+        create: yes
+        owner: "{{ cluster_admin_user }}"
+        group: "{{ cluster_admin_user }}"
+      when: cluster_admin_user is defined
 
     - name: Create k9s config directory for root
       file:
@@ -618,6 +642,50 @@
       shell: uname -r
       register: kernel_version
 
+    # Handle apt lock issues from unattended-upgrades
+    - name: Wait for unattended-upgrades to finish
+      shell: |
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+          echo "Waiting for other software managers to finish..."
+          sleep 5
+        done
+        while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+          echo "Waiting for other software managers to finish..."
+          sleep 5
+        done
+        while fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+          echo "Waiting for other software managers to finish..."
+          sleep 5
+        done
+      register: wait_for_apt_lock
+      retries: 12
+      delay: 10
+      until: wait_for_apt_lock.rc == 0
+
+    - name: Stop unattended-upgrades service if still running
+      systemd:
+        name: unattended-upgrades
+        state: stopped
+      failed_when: false
+
+    - name: Kill any remaining apt processes
+      shell: |
+        pkill -f unattended-upgrade || true
+        pkill -f apt || true
+        sleep 2
+      failed_when: false
+
+    - name: Remove apt locks if they still exist
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /var/lib/dpkg/lock-frontend
+        - /var/lib/apt/lists/lock
+        - /var/cache/apt/archives/lock
+        - /var/lib/dpkg/lock
+      failed_when: false
+
     - name: Install additional software
       apt:
         update_cache: true
@@ -799,13 +867,25 @@
         daemon_reload: true
       when: systemd_lxc_config.changed
 
-    - name: Add k8s Binaries to PATH
+    - name: Add k8s Binaries to PATH and set KUBECONFIG for root
       ansible.builtin.lineinfile:
         path: /root/.bashrc
         line: "{{ item }}"
       loop:
         - "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
         - "PATH=$PATH:/var/lib/rancher/rke2/bin"
+
+    - name: Add KUBECONFIG to root profile for persistent login
+      ansible.builtin.lineinfile:
+        path: /root/.profile
+        line: "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+        create: yes
+
+    - name: Add KUBECONFIG to system-wide environment
+      ansible.builtin.lineinfile:
+        path: /etc/environment
+        line: "KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+        create: yes
 
   post_tasks:
     - name: Verify storage paths on all nodes before local-path-provisioner
@@ -965,31 +1045,37 @@
           Check the debug information above for details.
       when: rke2_type == 'server' and (use_local_path_provisioner | bool) and lpp_wait_result.rc != 0
 
-    - name: Create .kube directory for adm4n user
+    - name: Create .kube directory for {{ cluster_admin_user }} user
       file:
-        path: /home/adm4n/.kube
+        path: /home/{{ cluster_admin_user }}/.kube
         state: directory
-        owner: adm4n
-        group: adm4n
+        owner: "{{ cluster_admin_user }}"
+        group: "{{ cluster_admin_user }}"
         mode: '0755'
-      when: rke2_type == 'server'
+      when: rke2_type == 'server' and cluster_admin_user is defined
 
-    - name: Configure kubectl access for adm4n user (copy kubeconfig)
+    - name: Configure kubectl access for {{ cluster_admin_user }} user (copy kubeconfig)
       copy:
         src: /etc/rancher/rke2/rke2.yaml
-        dest: /home/adm4n/.kube/config
-        owner: adm4n
-        group: adm4n
+        dest: /home/{{ cluster_admin_user }}/.kube/config
+        owner: "{{ cluster_admin_user }}"
+        group: "{{ cluster_admin_user }}"
         mode: '0600'
         remote_src: yes
-      when: rke2_type == 'server'
+      when: rke2_type == 'server' and cluster_admin_user is defined
 
     - name: Update kubeconfig server address for remote access
       replace:
-        path: /home/adm4n/.kube/config
+        path: /home/{{ cluster_admin_user }}/.kube/config
         regexp: 'https://127\.0\.0\.1:6443'
         replace: 'https://{{ ansible_default_ipv4.address }}:6443'
-      when: rke2_type == 'server'
+      when: rke2_type == 'server' and cluster_admin_user is defined
+
+    - name: Fix kubeconfig permissions for {{ cluster_admin_user }} user direct access
+      file:
+        path: /etc/rancher/rke2/rke2.yaml
+        mode: '0644'
+      when: rke2_type == 'server' and cluster_admin_user is defined
 
     - name: Test kubectl access
       shell: |
@@ -1090,9 +1176,9 @@
           k9s
           ```
           
-          ## User Access (adm4n)
+          ## User Access ({{ cluster_admin_user }})
           
-          The adm4n user has kubectl access via:
+          The {{ cluster_admin_user }} user has kubectl access via:
           - Personal kubeconfig: `~/.kube/config`
           - Aliases in `~/.bashrc` for kubectl, helm, k9s, k (kubectl shortcut)
           
