@@ -726,7 +726,7 @@
     daemon_reload: true
 
 # NOTE: Previous RKE2 v1.30.14+rke2r2 kube-scheduler bind-timeout bug fix removed
-# as this issue is resolved in Kubernetes 1.33 and RKE2 v1.33.3+rke2r1
+# as this issue is resolved in current RKE2 versions ({{ rke2_version }})
 
 # Production-grade health check script with comprehensive validation
 - name: Create comprehensive LXC health check script
@@ -876,7 +876,7 @@
       LXC-OPTIMIZED RKE2 CONFIGURATION APPLIED
       ========================================
       
-      RKE2 VERSION: v1.33.3+rke2r1 (Kubernetes v1.33.3)
+      RKE2 VERSION: {{ rke2_version }} (Kubernetes {{ kubernetes_version | default('v1.32.7') }})
       
       APPLIED CONFIGURATIONS:
       - Enhanced RKE2 Config: Integrated into main playbook configuration

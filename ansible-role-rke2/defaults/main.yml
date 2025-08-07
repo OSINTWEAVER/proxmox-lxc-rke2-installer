@@ -110,8 +110,10 @@ rke2_agent_node_taints: []
 # Pre-shared secret token that other server or agent nodes will register with when connecting to the cluster
 rke2_token: defaultSecret12345
 
-# RKE2 version - Updated to v1.33.3+rke2r1 for Kubernetes 1.33 with bind-timeout bug fix
-rke2_version: v1.33.3+rke2r1
+# RKE2 version - Updated to v1.32.7+rke2r1 for Rancher compatibility
+# Kubernetes v1.32.7 with proven stability and Rancher chart support
+# Component versions: Kubernetes v1.32.7, Etcd v3.5.21-k3s1, Containerd v2.0.5-k3s2
+rke2_version: v1.32.7+rke2r1
 
 # URL to RKE2 repository
 rke2_channel_url: https://update.rke2.io/v1-release/channels

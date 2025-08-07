@@ -1,0 +1,291 @@
+---
+# ===== RANCHER INSTALLATION =====
+# Install Rancher management UI following official documentation
+# https://ranchermanager.docs.rancher.com/getting-started/installation-and-upgrade/install-upgrade-on-a-kubernetes-cluster
+
+- name: Wait for RKE2 cluster to be fully ready before installing Rancher
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    # Wait for all system pods to be ready
+    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=300s
+    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n kube-system --timeout=300s
+    # Verify cluster is responsive
+    {{ rke2_data_path }}/bin/kubectl get nodes --no-headers | wc -l
+  register: cluster_readiness_check
+  until: cluster_readiness_check.rc == 0
+  retries: 10
+  delay: 30
+  args:
+    executable: /bin/bash
+
+- name: Add cert-manager Helm repository
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    /usr/local/bin/helm repo add jetstack https://charts.jetstack.io
+    /usr/local/bin/helm repo update
+  args:
+    executable: /bin/bash
+  register: cert_manager_repo_result
+  retries: 3
+  delay: 10
+  until: cert_manager_repo_result.rc == 0
+
+- name: Install cert-manager with optimized settings for LXC
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    /usr/local/bin/helm upgrade --install cert-manager jetstack/cert-manager \
+      --namespace cert-manager \
+      --create-namespace \
+      --version v1.15.3 \
+      --set crds.enabled=true \
+      --set prometheus.enabled=false \
+      --set resources.requests.cpu=50m \
+      --set resources.requests.memory=64Mi \
+      --set resources.limits.cpu=200m \
+      --set resources.limits.memory=256Mi \
+      --set webhook.resources.requests.cpu=10m \
+      --set webhook.resources.requests.memory=32Mi \
+      --set webhook.resources.limits.cpu=50m \
+      --set webhook.resources.limits.memory=128Mi \
+      --set cainjector.resources.requests.cpu=10m \
+      --set cainjector.resources.requests.memory=64Mi \
+      --set cainjector.resources.limits.cpu=100m \
+      --set cainjector.resources.limits.memory=256Mi \
+      --timeout=300s \
+      --wait
+  args:
+    executable: /bin/bash
+  register: cert_manager_install
+  retries: 2
+  delay: 30
+  until: cert_manager_install.rc == 0
+
+- name: Verify cert-manager installation
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    echo "=== cert-manager pods status ==="
+    {{ rke2_data_path }}/bin/kubectl get pods -n cert-manager
+    echo ""
+    echo "=== Waiting for cert-manager pods to be ready ==="
+    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=cert-manager -n cert-manager --timeout=180s
+    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=cainjector -n cert-manager --timeout=180s
+    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=webhook -n cert-manager --timeout=180s
+    echo "cert-manager is ready!"
+  args:
+    executable: /bin/bash
+
+- name: Add Rancher Helm repository
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    /usr/local/bin/helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+    /usr/local/bin/helm repo update
+  args:
+    executable: /bin/bash
+  register: rancher_repo_result
+  retries: 3
+  delay: 10
+  until: rancher_repo_result.rc == 0
+
+- name: Create cattle-system namespace for Rancher
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    {{ rke2_data_path }}/bin/kubectl create namespace cattle-system --dry-run=client -o yaml | {{ rke2_data_path }}/bin/kubectl apply -f -
+  args:
+    executable: /bin/bash
+
+- name: Install Rancher following official documentation (compatible with current K8s version)
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    /usr/local/bin/helm install rancher rancher-stable/rancher \
+      --namespace cattle-system \
+      --set hostname="{{ rancher_hostname }}" \
+      --set bootstrapPassword="{{ rancher_bootstrap_password }}" \
+      --set replicas=1 \
+      --set ingress.tls.source=rancher \
+      --set resources.requests.cpu=250m \
+      --set resources.requests.memory=512Mi \
+      --set resources.limits.cpu=500m \
+      --set resources.limits.memory=1Gi \
+      --set extraEnv[0].name=CATTLE_SYSTEM_DEFAULT_REGISTRY \
+      --set extraEnv[0].value="" \
+      --set useBundledSystemChart=true \
+      --timeout=600s \
+      --wait
+  args:
+    executable: /bin/bash
+  register: rancher_install_result
+
+- name: Wait for Rancher deployment to be ready
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    {{ rke2_data_path }}/bin/kubectl -n cattle-system rollout status deploy/rancher --timeout=600s
+  args:
+    executable: /bin/bash
+
+- name: Get comprehensive Rancher deployment status
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    echo "=== Rancher Deployment Status ==="
+    {{ rke2_data_path }}/bin/kubectl get deployment -n cattle-system rancher -o wide
+    echo ""
+    echo "=== Rancher Pods ==="
+    {{ rke2_data_path }}/bin/kubectl get pods -n cattle-system -l app=rancher -o wide
+    echo ""
+    echo "=== Rancher Pod Descriptions ==="
+    {{ rke2_data_path }}/bin/kubectl describe pods -n cattle-system -l app=rancher
+    echo ""
+    echo "=== Rancher Ingress ==="
+    {{ rke2_data_path }}/bin/kubectl get ingress -n cattle-system rancher -o wide
+    echo ""
+    echo "=== Rancher Service ==="
+    {{ rke2_data_path }}/bin/kubectl get svc -n cattle-system rancher -o wide
+    echo ""
+    echo "=== cert-manager Status ==="
+    {{ rke2_data_path }}/bin/kubectl get pods -n cert-manager -o wide
+    echo ""
+    echo "=== All cattle-system resources ==="
+    {{ rke2_data_path }}/bin/kubectl get all -n cattle-system
+    echo ""
+    echo "=== Traefik Ingress Controller Status ==="
+    {{ rke2_data_path }}/bin/kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
+  args:
+    executable: /bin/bash
+  register: rancher_status
+
+- name: Display Rancher access information
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      🎉 RANCHER INSTALLATION COMPLETE! 🎉
+      ========================================
+      
+      Rancher UI Access:
+      🌐 URL: https://{{ rancher_hostname }}
+      👤 Username: admin
+      🔑 Bootstrap Password: {{ rancher_bootstrap_password }}
+      
+      📝 Next Steps:
+      1. Add {{ rancher_hostname }} to your DNS or hosts file pointing to {{ rke2_api_ip }}
+      2. Access Rancher UI at https://{{ rancher_hostname }}
+      3. Login with username 'admin' and the bootstrap password
+      4. Follow the setup wizard to complete configuration
+      
+      ⚠️  IMPORTANT SECURITY NOTES:
+      - Change the bootstrap password after first login
+      - Configure proper SSL certificates for production use
+      - The current setup uses Rancher-generated self-signed certificates
+      
+      🔧 Troubleshooting:
+      - Check pod status: kubectl get pods -n cattle-system
+      - Check ingress: kubectl get ingress -n cattle-system
+      - View logs: kubectl logs -n cattle-system deployment/rancher
+      
+      {{ rancher_status.stdout }}
+
+- name: Create Rancher access info file
+  ansible.builtin.copy:
+    content: |
+      # Rancher Management Console Access
+      
+      ## Quick Access
+      
+      **Rancher UI**: https://{{ rancher_hostname }}
+      **Username**: admin
+      **Bootstrap Password**: {{ rancher_bootstrap_password }}
+      
+      ## DNS Configuration Required
+      
+      Add the following to your DNS or hosts file:
+      ```
+      {{ rke2_api_ip }}  {{ rancher_hostname }}
+      ```
+      
+      ### Windows hosts file:
+      `C:\Windows\System32\drivers\etc\hosts`
+      
+      ### Linux/macOS hosts file:
+      `/etc/hosts`
+      
+      ## First Login Steps
+      
+      1. Browse to https://{{ rancher_hostname }}
+      2. Accept the self-signed certificate warning
+      3. Login with:
+         - Username: `admin`
+         - Password: `{{ rancher_bootstrap_password }}`
+      4. Follow the setup wizard to:
+         - Set a new secure password
+         - Configure server URL
+         - Accept license agreement
+      
+      ## Rancher Features Available
+      
+      - **Cluster Management**: Import and manage existing Kubernetes clusters
+      - **Project/Namespace Management**: Organize resources with projects
+      - **Application Catalog**: Deploy apps from Helm charts
+      - **User Management**: RBAC, authentication providers
+      - **Monitoring & Logging**: Built-in Prometheus and Grafana
+      - **Backup & Restore**: Cluster backup solutions
+      - **Service Mesh**: Istio integration
+      - **CI/CD**: Fleet GitOps deployments
+      
+      ## CLI Access
+      
+      You can also manage Rancher via kubectl:
+      ```bash
+      # Check Rancher pods
+      kubectl get pods -n cattle-system
+      
+      # Check Rancher services
+      kubectl get svc -n cattle-system
+      
+      # View Rancher logs
+      kubectl logs -n cattle-system deployment/rancher
+      
+      # Scale Rancher (if needed)
+      kubectl scale -n cattle-system deployment/rancher --replicas=1
+      ```
+      
+      ## Security Notes
+      
+      - **Change default password immediately after first login**
+      - **Configure proper SSL certificates for production**
+      - **Enable MFA for admin users**
+      - **Regularly update Rancher to latest version**
+      - **Review and configure network policies**
+      
+      ## Troubleshooting
+      
+      ### Common Issues:
+      1. **Can't access Rancher UI**:
+         - Check DNS/hosts file configuration
+         - Verify {{ rancher_hostname }} resolves to {{ rke2_api_ip }}
+         - Check ingress controller is running
+      
+      2. **SSL Certificate warnings**:
+         - Normal for self-signed certificates
+         - Configure proper certificates for production
+      
+      3. **Rancher pods not starting**:
+         - Check node resources (CPU/memory)
+         - Review pod logs: `kubectl logs -n cattle-system deployment/rancher`
+         - Check persistent volume availability
+      
+      ### Support Commands:
+      ```bash
+      # Full Rancher status
+      kubectl get all -n cattle-system
+      
+      # Rancher configuration
+      kubectl get cm -n cattle-system
+      
+      # Rancher secrets
+      kubectl get secrets -n cattle-system
+      
+      # Ingress controller status
+      kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
+      ```
+    dest: "{{ playbook_dir | default('/tmp') }}/../rancher-access-info.md"
+    mode: '0644'
+  delegate_to: localhost
+  become: false

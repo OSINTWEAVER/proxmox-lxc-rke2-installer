@@ -3,7 +3,7 @@
   hosts: all
   become: yes
   vars:
-    rke2_version: v1.33.3+rke2r1
+    # Uses role default rke2_version from defaults/main.yml
     rke2_snapshotter: native
   roles:
     - role: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') | basename }}"

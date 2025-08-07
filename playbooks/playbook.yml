@@ -2,8 +2,6 @@
   hosts: all
   become: true
   vars:
-    # RKE2 version - Updated to v1.33.3+rke2r1 for Kubernetes 1.33 with upstream bug fixes
-    rke2_version: "v1.33.3+rke2r1"
     # Load balancer IP (configured in inventory file as rke2_api_ip)
     # Example: rke2_api_ip: "10.14.100.1"
 
@@ -221,7 +219,7 @@
         state: directory
         mode: '0755'
 
-    # Add Docker GPG key and repository (even though we won't install Docker)
+    # Add Docker GPG key and repository for control plane Docker installation
     - name: Add Docker GPG key
       shell: |
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
@@ -234,6 +232,166 @@
         state: present
         update_cache: yes
 
+    # ===== DOCKER INSTALLATION (CONTROL PLANE ONLY) =====
+    # Install Docker CE on control plane for management tasks
+    # Docker will use a different socket (/var/run/docker.sock) than containerd (/run/containerd/containerd.sock)
+    # so they won't interfere with each other
+
+    - name: Install Docker CE on control plane only
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+      when: inventory_hostname in groups['rke2_servers']
+
+    - name: Start and enable Docker service on control plane
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      when: inventory_hostname in groups['rke2_servers']
+      register: docker_start_result
+      failed_when: false
+
+    - name: Check Docker service status if start failed
+      shell: |
+        echo "=== Docker Service Status ==="
+        systemctl status docker.service --no-pager
+        echo ""
+        echo "=== Docker Daemon Logs ==="
+        journalctl -u docker.service --no-pager -n 20
+        echo ""
+        echo "=== Docker Daemon Configuration ==="
+        cat /etc/docker/daemon.json
+        echo ""
+        echo "=== Storage Driver Check ==="
+        df -h /var/lib/docker 2>/dev/null || echo "/var/lib/docker not available"
+        echo ""
+        echo "=== Runtime Check ==="
+        which runc || echo "runc not found"
+        runc --version 2>/dev/null || echo "runc version check failed"
+      register: docker_debug_info
+      when: 
+        - inventory_hostname in groups['rke2_servers']
+        - docker_start_result.failed | default(false)
+
+    - name: Display Docker debug information
+      debug:
+        msg: "{{ docker_debug_info.stdout_lines }}"
+      when: 
+        - inventory_hostname in groups['rke2_servers']
+        - docker_start_result.failed | default(false)
+
+    - name: Try alternative Docker configuration for LXC environments
+      copy:
+        content: |
+          {
+            "storage-driver": "vfs",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "exec-opts": ["native.cgroupdriver=systemd"],
+            "live-restore": false,
+            "userland-proxy": false
+          }
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+        owner: root
+        group: root
+      when: 
+        - inventory_hostname in groups['rke2_servers']
+        - docker_start_result.failed | default(false)
+
+    - name: Restart Docker with alternative configuration
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: yes
+      when: 
+        - inventory_hostname in groups['rke2_servers']
+        - docker_start_result.failed | default(false)
+      register: docker_restart_result
+
+    - name: Fail if Docker still won't start
+      fail:
+        msg: |
+          Docker failed to start even with alternative configuration.
+          This may be due to:
+          1. LXC container limitations with overlay2 storage driver
+          2. Missing kernel modules in LXC environment
+          3. Conflicting with containerd runtime
+          
+          To resolve:
+          1. Check if the LXC container has Docker support enabled
+          2. Consider using Docker in a VM instead of LXC container
+          3. Or skip Docker installation and use containerd tools directly
+      when: 
+        - inventory_hostname in groups['rke2_servers']
+        - docker_restart_result.failed | default(false)
+
+    - name: Add cluster admin user to docker group for passwordless Docker access
+      user:
+        name: "{{ cluster_admin_user }}"
+        groups: docker
+        append: yes
+      when: inventory_hostname in groups['rke2_servers']
+
+    - name: Create optimal Docker daemon configuration for LXC
+      copy:
+        content: |
+          {
+            "storage-driver": "vfs",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "exec-opts": ["native.cgroupdriver=systemd"],
+            "live-restore": false,
+            "userland-proxy": false,
+            "iptables": false,
+            "bridge": "none"
+          }
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+        owner: root
+        group: root
+      when: inventory_hostname in groups['rke2_servers']
+
+    - name: Start and enable Docker service with optimal configuration
+      systemd:
+        name: docker
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+      when: inventory_hostname in groups['rke2_servers']
+      register: final_docker_start
+
+    - name: Verify Docker is working correctly
+      shell: |
+        echo "=== Docker Status ==="
+        systemctl status docker --no-pager -l
+        echo ""
+        echo "=== Docker Info ==="
+        docker info 2>/dev/null || echo "Docker info failed"
+        echo ""
+        echo "=== Test Docker Hello World ==="
+        docker run --rm hello-world 2>/dev/null || echo "Docker hello-world test failed"
+      register: docker_verification
+      when: inventory_hostname in groups['rke2_servers']
+      failed_when: false
+
+    - name: Display Docker verification results
+      debug:
+        msg: "{{ docker_verification.stdout_lines }}"
+      when: inventory_hostname in groups['rke2_servers']
+
     # ===== KUBERNETES TOOLS INSTALLATION =====
     # Install kubectl, helm, and k9s for cluster management
 
@@ -245,9 +403,9 @@
         owner: root
         group: root
 
-    - name: Download and install kubectl (same version as RKE2)
+    - name: Download and install kubectl (matching RKE2 Kubernetes version)
       get_url:
-        url: "https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl"
+        url: "https://dl.k8s.io/release/{{ kubernetes_version | default('v1.32.7') }}/bin/linux/amd64/kubectl"
         dest: /usr/local/bin/kubectl
         mode: '0755'
         owner: root
@@ -913,32 +1071,6 @@
         msg: "{{ storage_verification.stdout_lines }}"
       when: use_local_path_provisioner | bool
 
-    - name: Check and remove cloud provider uninitialized taint (prevents pod scheduling)
-      shell: |
-        echo "=== Checking for cloud provider uninitialized taints ==="
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o custom-columns="NODE:.metadata.name,TAINTS:.spec.taints[*].key" | grep -E "cloudprovider|uninitialized" || echo "No cloud provider taints found"
-        echo ""
-        echo "=== Removing cloud provider uninitialized taint from all nodes ==="
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml taint nodes --all node.cloudprovider.kubernetes.io/uninitialized- || echo "Taint not present or already removed"
-        echo ""
-        echo "=== Verifying taints after removal ==="
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml describe nodes | grep -A 2 "Taints:" || echo "No taints found"
-      when: rke2_type == 'server'
-      register: taint_removal_result
-
-    - name: Display taint removal results
-      debug:
-        msg: "{{ taint_removal_result.stdout_lines }}"
-      when: rke2_type == 'server'
-
-    - name: Wait for critical system pods to be ready after taint removal
-      shell: |
-        echo "Waiting for system pods to schedule after taint removal..."
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=300s || echo "CoreDNS wait timed out"
-        {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app.kubernetes.io/name=metrics-server -n kube-system --timeout=300s || echo "Metrics server wait timed out"
-      when: rke2_type == 'server'
-      register: system_pods_wait
-
     - name: Debug custom manifests configuration
       debug:
         msg: |
@@ -1132,6 +1264,9 @@
         {% if has_gpu_nodes %}
         echo "✓ NVIDIA Container Toolkit: Configured for GPU workloads"
         {% endif %}
+        {% if install_rancher | default(false) | bool %}
+        echo "✓ Rancher UI: Available at https://{{ rancher_hostname }}"
+        {% endif %}
       when: rke2_type == 'server'
       register: cluster_info
 
@@ -1185,7 +1320,7 @@
           ## Cluster Architecture
           
           ### Core Components
-          - **Kubernetes Version**: 1.33.3 (via RKE2 v1.33.3+rke2r1)
+          - **Kubernetes Version**: {{ kubernetes_version | default('v1.32.7') | regex_replace('^v', '') }} (via RKE2 {{ rke2_version }})
           - **CNI**: Flannel (optimized for LXC containers)
           - **Runtime**: RKE2 Embedded Containerd (Docker-free)
           - **Datastore**: SQLite (single server + multi-agent architecture)
@@ -1245,10 +1380,22 @@
           {% if has_gpu_nodes %}
           - ✅ **NVIDIA Container Toolkit**: Handled by RKE2 role for GPU workloads
           {% endif %}
+          {% if install_rancher | default(false) | bool %}
+          - ✅ **Rancher UI**: Available at https://{{ rancher_hostname }}
+          {% endif %}
         dest: "{{ playbook_dir }}/../cluster-access-info.md"
         mode: '0644'
       when: rke2_type == 'server'
       delegate_to: localhost
+
+    # ===== RANCHER INSTALLATION (FINAL STEP) =====
+    # Install Rancher Management UI after ALL cluster components are verified and ready
+    - name: Install Rancher Management UI (final step after all cluster verification)
+      ansible.builtin.include_tasks: ../ansible-role-rke2/tasks/rancher.yml
+      when: 
+        - install_rancher | default(false) | bool
+        - inventory_hostname == groups['rke2_servers'][0]
+        - rke2_type == 'server'
 
   roles:
     - role: ../ansible-role-rke2
