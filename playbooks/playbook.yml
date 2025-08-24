@@ -1384,9 +1384,12 @@
           - ✅ **Rancher UI**: Available at https://{{ rancher_hostname }}
           {% endif %}
         dest: "{{ playbook_dir }}/../cluster-access-info.md"
-        mode: '0644'
       when: rke2_type == 'server'
       delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+        ansible_become: false
 
     # ===== RANCHER INSTALLATION (FINAL STEP) =====
     # Install Rancher Management UI after ALL cluster components are verified and ready

@@ -286,6 +286,8 @@
       kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
       ```
     dest: "{{ playbook_dir | default('/tmp') }}/../rancher-access-info.md"
-    mode: '0644'
   delegate_to: localhost
   become: false
+  vars:
+    ansible_connection: local
+    ansible_become: false

@@ -1,0 +1,177 @@
+---
+- name: Provision LXC containers on Proxmox hosts (Debian)
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars_files:
+    - vars/lxc_map.yml
+
+  pre_tasks:
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+    - name: Show LXC plan for this host
+      ansible.builtin.debug:
+        var: (proxmox_cluster.containers | selectattr('host', 'equalto', inventory_hostname) | list)
+
+  tasks:
+    - name: Ensure required kernel modules are loaded
+      ansible.builtin.shell: |
+        set -e
+        modprobe overlay || true
+        modprobe ip_tables || true
+        modprobe ip6_tables || true
+        modprobe nf_nat || true
+        modprobe xt_conntrack || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Persist kernel modules across reboots
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - overlay
+        - ip_tables
+        - ip6_tables
+        - nf_nat
+        - xt_conntrack
+
+    - name: Prepare data storage for mounts (ZFS volumes and directories)
+      ansible.builtin.include_tasks: mount_prep.yml
+      when: item.host == inventory_hostname and (item.mounts is defined) and (mount is defined)
+      loop: "{{ proxmox_cluster.containers | subelements('mounts', skip_missing=True) }}"
+      loop_control:
+        loop_var: item_mount
+      vars:
+        item: "{{ item_mount.0 }}"
+        mount: "{{ item_mount.1 }}"
+
+    - name: Build mount flags string for pct create
+      when: item.host == inventory_hostname
+      ansible.builtin.set_fact:
+        pct_mount_flags: |
+          {%- set flags = [] -%}
+          {%- if item.mounts is defined -%}
+          {%- for m in item.mounts -%}
+            {%- set idx = loop.index0 -%}
+            {%- if m.type == 'zfs_volume' -%}
+              {%- set src = '/dev/zvol/' + (m.pool | default(proxmox_cluster.storage_defaults.zfs_pool)) + '/' + m.name -%}
+            {%- elif m.type == 'directory' -%}
+              {%- set src = m.host_path -%}
+            {%- elif m.type == 'lvm_lv' -%}
+              {%- set src = '/dev/' + m.vg + '/' + m.lv -%}
+            {%- else -%}
+              {%- set src = '' -%}
+            {%- endif -%}
+            {%- if src -%}
+            {{ '--mp' + idx|string + ' ' + src + ',mp=' + m.container_path }}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- endif -%}
+      loop: "{{ proxmox_cluster.containers }}"
+      register: pct_mount_flags_results
+
+    - name: Map results to host/container id
+      when: item.item.host == inventory_hostname
+      ansible.builtin.set_fact:
+        pct_mount_flags_map: "{{ (pct_mount_flags_map | default({})) | combine({ item.item.id: (item.ansible_facts.pct_mount_flags | trim) }) }}"
+      loop: "{{ pct_mount_flags_results.results }}"
+
+    - name: Create LXC containers if missing
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: >-
+        pct create {{ item.id }} {{ proxmox_cluster.template }}
+        --hostname {{ item.hostname }}
+        --memory {{ item.memory }}
+        --cores {{ item.cores }}
+        --net0 name=eth0,bridge={{ proxmox_cluster.bridge }},firewall=1,gw={{ proxmox_cluster.gateway }},ip={{ item.ip }},tag={{ proxmox_cluster.vlan_tag }},type=veth
+        --ostype ubuntu --swap 0 --rootfs {{ item.rootfs }}
+        {{ pct_mount_flags_map[item.id] | default('') }}
+        --unprivileged 0
+      args:
+        executable: /bin/bash
+        creates: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Apply LXC security profile for Kubernetes (idempotent)
+      when: item.host == inventory_hostname
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_K8S_SETTINGS"
+        block: |
+          lxc.apparmor.profile: unconfined
+          lxc.cgroup2.devices.allow: a
+          lxc.cgroup2.devices.allow: b
+          lxc.cgroup2.devices.allow: c
+          lxc.mount.auto: proc:rw sys:rw cgroup:rw
+          # --- NVIDIA GPU Passthrough (Optional)
+          lxc.mount.entry: /dev/nvidia0                 dev/nvidia0                 none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidiactl               dev/nvidiactl               none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-uvm              dev/nvidia-uvm              none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-uvm-tools        dev/nvidia-uvm-tools        none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-caps/nvidia-cap1 dev/nvidia-caps/nvidia-cap1 none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-caps/nvidia-cap2 dev/nvidia-caps/nvidia-cap2 none bind,optional,create=file
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Start containers if not running
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct status {{ item.id }} | grep -q running || pct start {{ item.id }}
+      args:
+        executable: /bin/bash
+      changed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Ensure administrative SSH user exists inside containers
+      when: item.host == inventory_hostname
+      vars:
+        user_name: "{{ item.ssh_user | default(proxmox_cluster.ssh.username | default('adm4n')) }}"
+        user_password: "{{ item.ssh_password | default(proxmox_cluster.ssh.password | default('CHANGE_THIS_PASSWORD')) }}"
+      ansible.builtin.shell: |
+        set -e
+        pct exec {{ item.id }} -- bash -lc 'id -u {{ user_name }} >/dev/null 2>&1 || adduser --disabled-password --gecos "" {{ user_name }}'
+        pct exec {{ item.id }} -- bash -lc 'echo "{{ user_name }}:{{ user_password }}" | chpasswd'
+        pct exec {{ item.id }} -- bash -lc 'usermod -aG sudo {{ user_name }}'
+        pct exec {{ item.id }} -- bash -lc 'echo "{{ user_name }} ALL=(ALL) NOPASSWD:ALL" | EDITOR="tee" visudo -f /etc/sudoers.d/{{ user_name }}'
+        pct exec {{ item.id }} -- bash -lc 'mkdir -p /home/{{ user_name }}/.ssh && chmod 700 /home/{{ user_name }}/.ssh && chown -R {{ user_name }}:{{ user_name }} /home/{{ user_name }}'
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Push NVIDIA driver into GPU containers (if defined)
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      vars:
+        host_path: "{{ item.nvidia_driver_host_path | default(proxmox_cluster.nvidia.driver_host_path | default('')) }}"
+        dest_dir: "{{ item.nvidia_driver_dest_path | default(proxmox_cluster.nvidia.driver_dest_path | default('/root')) }}"
+      ansible.builtin.shell: |
+        if [ "{{ host_path | length }}" -eq 0 ]; then
+          echo "No NVIDIA driver_host_path configured; skipping push for container {{ item.id }}"
+        else
+          driver_filename=$(basename "{{ host_path }}")
+          pct push {{ item.id }} "{{ host_path }}" "{{ dest_dir }}/${driver_filename}"
+          echo "Pushed {{ host_path }} to container {{ item.id }} at {{ dest_dir }}/${driver_filename}"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Show container status
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct status {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: pct_status_out
+      changed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Print status summaries
+      ansible.builtin.debug:
+        msg: "ID {{ item.item.id }} -> {{ item.stdout | default('') }}"
+      loop: "{{ pct_status_out.results | default([]) }}"

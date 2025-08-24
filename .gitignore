@@ -7,6 +7,7 @@ kubeconfs/
 
 # Inventory files (except templates and examples)
 hosts.ini
+hosts_proxmox.ini
 
 *tar.gz
 *.log
@@ -20,3 +21,5 @@ hosts.ini
 *.orig
 push-to-github.sh
 *.pem
+
+lxc_map.yml
