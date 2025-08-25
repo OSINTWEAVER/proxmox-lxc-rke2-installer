@@ -26,3 +26,4 @@ push-to-github.sh
 # Ignore sensitive Proxmox LXC maps (keep template tracked)
 proxmox/vars/lxc_map*.yml
 !proxmox/vars/lxc_map_template.yml
+hosts-octostar.ini

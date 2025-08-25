@@ -1,0 +1,162 @@
+---
+# Tool Installation for RKE2 Cluster Management
+# This task file installs additional kubectl tooling for enhanced cluster management
+
+- name: Check if stern is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/stern
+  register: stern_binary_stat
+
+- name: Get installed stern version if exists
+  ansible.builtin.command:
+    cmd: /usr/local/bin/stern --version
+  register: stern_version_check
+  failed_when: false
+  changed_when: false
+  when: stern_binary_stat.stat.exists
+
+- name: Set stern version facts
+  ansible.builtin.set_fact:
+    stern_installed: "{{ stern_binary_stat.stat.exists }}"
+    stern_current_version: "{{ stern_version_check.stdout | regex_search('stern version ([0-9.]+)', '\\1') | first if stern_version_check.rc == 0 and stern_binary_stat.stat.exists else 'unknown' }}"
+
+- name: Install/Update stern (Kubernetes log tailing tool)
+  block:
+    - name: Download stern binary
+      ansible.builtin.get_url:
+        url: "https://github.com/stern/stern/releases/download/v{{ stern_version }}/stern_{{ stern_version }}_linux_amd64.tar.gz"
+        dest: /tmp/stern_{{ stern_version }}_linux_amd64.tar.gz
+        mode: '0644'
+        timeout: 60
+
+    - name: Extract stern binary
+      ansible.builtin.unarchive:
+        src: /tmp/stern_{{ stern_version }}_linux_amd64.tar.gz
+        dest: /tmp
+        remote_src: true
+        creates: /tmp/stern
+
+    - name: Install stern binary
+      ansible.builtin.copy:
+        src: /tmp/stern
+        dest: /usr/local/bin/stern
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: true
+
+    - name: Create stern symlink in RKE2 bin directory
+      ansible.builtin.file:
+        src: /usr/local/bin/stern
+        dest: "{{ rke2_data_path }}/bin/stern"
+        state: link
+        force: true
+
+    - name: Cleanup stern download files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/stern_{{ stern_version }}_linux_amd64.tar.gz
+        - /tmp/stern
+
+  when: not stern_installed or (stern_current_version is defined and stern_current_version != stern_version)
+
+- name: Verify stern installation
+  ansible.builtin.command:
+    cmd: /usr/local/bin/stern --version
+  register: stern_verify
+  changed_when: false
+
+- name: Display stern installation status
+  ansible.builtin.debug:
+    msg: 
+      - "✅ Stern successfully installed: {{ stern_verify.stdout }}"
+      - "📍 Location: /usr/local/bin/stern"
+      - "🔗 Also available at: {{ rke2_data_path }}/bin/stern" 
+      - "💡 Usage: stern <pod-pattern> -n <namespace>"
+
+# Helmfile installation - only on server nodes
+- name: Check if helmfile is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/helmfile
+  register: helmfile_binary_stat
+  when: inventory_hostname in groups[rke2_servers_group_name]
+
+- name: Get installed helmfile version if exists
+  ansible.builtin.command:
+    cmd: /usr/local/bin/helmfile --version
+  register: helmfile_version_check
+  failed_when: false
+  changed_when: false
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]
+    - helmfile_binary_stat.stat.exists
+
+- name: Set helmfile version facts
+  ansible.builtin.set_fact:
+    helmfile_installed: "{{ helmfile_binary_stat.stat.exists }}"
+    helmfile_current_version: "{{ helmfile_version_check.stdout | regex_search('helmfile version v([0-9.]+)', '\\1') | first if helmfile_version_check.rc == 0 else 'unknown' }}"
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]
+    - helmfile_binary_stat.stat.exists
+
+- name: Install/Update helmfile (Declarative Helm deployment tool) 
+  block:
+    - name: Download helmfile binary
+      ansible.builtin.get_url:
+        url: "https://github.com/helmfile/helmfile/releases/download/v{{ helmfile_version }}/helmfile_{{ helmfile_version }}_linux_amd64.tar.gz"
+        dest: /tmp/helmfile_{{ helmfile_version }}_linux_amd64.tar.gz
+        mode: '0644'
+        timeout: 60
+
+    - name: Extract helmfile binary
+      ansible.builtin.unarchive:
+        src: /tmp/helmfile_{{ helmfile_version }}_linux_amd64.tar.gz
+        dest: /tmp
+        remote_src: true
+        creates: /tmp/helmfile
+
+    - name: Install helmfile binary
+      ansible.builtin.copy:
+        src: /tmp/helmfile
+        dest: /usr/local/bin/helmfile
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: true
+
+    - name: Create helmfile symlink in RKE2 bin directory
+      ansible.builtin.file:
+        src: /usr/local/bin/helmfile
+        dest: "{{ rke2_data_path }}/bin/helmfile"
+        state: link
+        force: true
+
+    - name: Cleanup helmfile download files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/helmfile_{{ helmfile_version }}_linux_amd64.tar.gz
+        - /tmp/helmfile
+
+  when: 
+    - inventory_hostname in groups[rke2_servers_group_name]
+    - not helmfile_installed or (helmfile_current_version is defined and helmfile_current_version != helmfile_version)
+
+- name: Verify helmfile installation
+  ansible.builtin.command:
+    cmd: /usr/local/bin/helmfile --version
+  register: helmfile_verify
+  changed_when: false
+  when: inventory_hostname in groups[rke2_servers_group_name]
+
+- name: Display helmfile installation status
+  ansible.builtin.debug:
+    msg: 
+      - "✅ Helmfile successfully installed: {{ helmfile_verify.stdout }}"
+      - "📍 Location: /usr/local/bin/helmfile"
+      - "🔗 Also available at: {{ rke2_data_path }}/bin/helmfile"
+      - "💡 Usage: helmfile apply (with helmfile.yaml in current directory)"
+  when: inventory_hostname in groups[rke2_servers_group_name]

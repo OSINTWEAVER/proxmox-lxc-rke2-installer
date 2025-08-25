@@ -13,7 +13,6 @@ WantedBy=multi-user.target
 Type=simple
 # LXC-specific pre-checks and setup
 ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service'
-ExecStartPre=/usr/local/bin/setup-gpu-devices.sh
 ExecStartPre=/bin/sh -c 'ln -sf /dev/null /dev/kmsg 2>/dev/null || true'
 ExecStartPre=/bin/sh -c 'mount --make-rshared / 2>/dev/null || true'
 

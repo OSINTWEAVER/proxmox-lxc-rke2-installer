@@ -1,16 +1,43 @@
 ---
-- name: Create the RKE2 manifests directory
-  ansible.builtin.file:
-    state: directory
-    path: "{{ rke2_data_path }}/server/manifests"
-    owner: root
-    group: root
-    mode: 0700
+- name: Install NGINX Ingress Controller
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
+  loop: "{{ lookup('file', '../../../manifests/ingress-nginx.yaml') | from_yaml_all | list }}"
+  when: rke2_ingress_nginx_enabled | default(false)
+  
+- name: Verify NGINX Ingress Controller deployment
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: ingress-nginx-controller
+    namespace: ingress-nginx
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
+  when: rke2_ingress_nginx_enabled | default(false)
+  register: nginx_deployment_status
 
-- name: Copy ingress-nginx files to first server
-  ansible.builtin.template:
-    src: "templates/ingress-nginx-config.yml.j2"
-    dest: "{{ rke2_data_path }}/server/manifests/rke2-ingress-nginx-config.yaml"
-    owner: root
-    group: root
-    mode: 0664
+- name: Verify NGINX Ingress Service is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    name: ingress-nginx-controller
+    namespace: ingress-nginx
+  when: rke2_ingress_nginx_enabled | default(false)
+  register: nginx_service_status
+
+- name: Display NGINX Ingress Controller status
+  ansible.builtin.debug:
+    msg: 
+      - "NGINX Ingress Controller deployment status: {{ nginx_deployment_status.resources[0].status.conditions | map(attribute='type') | list if nginx_deployment_status.resources else 'Not found' }}"
+      - "NGINX Ingress Service type: {{ nginx_service_status.resources[0].spec.type if nginx_service_status.resources else 'Not found' }}"
+      - "LoadBalancer status: {{ nginx_service_status.resources[0].status.loadBalancer if nginx_service_status.resources and nginx_service_status.resources[0].status.loadBalancer is defined else 'Pending' }}"
+  when: rke2_ingress_nginx_enabled | default(false)

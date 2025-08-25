@@ -1,0 +1,105 @@
+---
+# ===== POST-DEPLOYMENT COMPONENTS =====
+# This playbook installs components that require a working cluster
+# Run AFTER the core cluster deployment is complete and verified
+
+- name: Install Post-Deployment Components  
+  hosts: rke2_servers[0]
+  become: true
+  vars:
+    # Kubeconfig path for cluster operations
+    kubeconfig_path: "/etc/rancher/rke2/rke2.yaml"
+    rke2_data_path: "/var/lib/rancher/rke2"
+    
+    # Component flags (set these in inventory or group_vars)
+    install_management_tools: true
+    install_ingress_nginx: "{{ rke2_ingress_nginx_enabled | default(false) }}"
+    install_rancher_ui: "{{ install_rancher | default(false) }}"
+    # Note: Local-path-provisioner is installed as part of core cluster deployment
+
+  tasks:
+    # ===== CLUSTER READINESS VERIFICATION =====
+    - name: Wait for cluster to be fully ready
+      shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        
+        echo "🔍 Verifying cluster readiness..."
+        
+        # Wait for all nodes to be Ready
+        {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready nodes --all --timeout=300s
+        
+        # Wait for core system pods
+        {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=300s
+        
+        # Verify cluster is responsive
+        node_count=$({{ rke2_data_path }}/bin/kubectl get nodes --no-headers | wc -l)
+        echo "✅ Cluster ready with $node_count nodes"
+        
+      register: cluster_readiness
+      until: cluster_readiness.rc == 0
+      retries: 10
+      delay: 30
+      ignore_unreachable: true
+      args:
+        executable: /bin/bash
+
+    # ===== MANAGEMENT TOOLS INSTALLATION =====
+    - name: Install Management Tools (stern, helmfile)
+      include_tasks: ../ansible-role-rke2/tasks/tools.yml
+      when: install_management_tools | bool
+      retries: 3
+      delay: 30
+      ignore_unreachable: true
+
+    # ===== INGRESS CONTROLLER INSTALLATION =====
+    - name: Install NGINX Ingress Controller
+      include_tasks: ../ansible-role-rke2/tasks/ingress-nginx.yml
+      when: install_ingress_nginx | bool
+      retries: 3
+      delay: 30
+      ignore_unreachable: true
+
+    # ===== RANCHER UI INSTALLATION =====
+    - name: Install Rancher Management UI
+      include_tasks: ../ansible-role-rke2/tasks/rancher.yml
+      when: install_rancher_ui | bool
+      retries: 3
+      delay: 30
+      ignore_unreachable: true
+
+    # ===== POST-DEPLOYMENT SUMMARY =====
+    - name: Display post-deployment summary
+      debug:
+        msg: |
+          ===================================================
+          🎉 POST-DEPLOYMENT COMPONENTS INSTALLED! 🎉
+          ===================================================
+          
+          ✅ Management Tools: {{ 'Installed' if install_management_tools else 'Skipped' }}
+             • stern: Available for log tailing
+             • helmfile: Available on servers
+          
+          ✅ NGINX Ingress: {{ 'Installed' if install_ingress_nginx else 'Skipped' }}
+          ✅ Local Path Storage: Installed as part of core cluster deployment
+          ✅ Rancher UI: {{ 'Installed' if install_rancher_ui else 'Skipped' }}
+          
+          🔧 Your cluster is now fully enhanced and ready for workloads!
+          
+          📋 Access Information:
+          • kubectl: {{ rke2_data_path }}/bin/kubectl --kubeconfig {{ kubeconfig_path }}
+          • k9s: k9s --kubeconfig {{ kubeconfig_path }}
+          {% if install_rancher_ui %}
+          • Rancher UI: https://{{ rancher_hostname | default('your-rancher-hostname') }}
+          {% endif %}
+
+# ===== MANAGEMENT TOOLS FOR ALL NODES =====
+- name: Install Management Tools on All Nodes
+  hosts: all
+  become: true
+  tasks:
+    - name: Install basic management tools on all nodes
+      include_tasks: ../ansible-role-rke2/tasks/tools.yml
+      when: install_management_tools | default(true) | bool
+      retries: 3
+      delay: 30
+      ignore_unreachable: true

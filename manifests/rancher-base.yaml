@@ -1,0 +1,278 @@
+# Rancher Management Platform deployment
+# Based on Rancher v2.8.x official manifests
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cattle-system
+  labels:
+    name: cattle-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rancher
+  namespace: cattle-system
+  labels:
+    app: rancher
+    chart: rancher
+    heritage: Helm
+    release: rancher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rancher
+  labels:
+    app: rancher
+    chart: rancher
+    heritage: Helm
+    release: rancher
+subjects:
+- kind: ServiceAccount
+  name: rancher
+  namespace: cattle-system
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rancher-config
+  namespace: cattle-system
+  labels:
+    app: rancher
+    chart: rancher
+    heritage: Helm
+    release: rancher
+data:
+  # Rancher configuration will be populated by deployment
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rancher
+  namespace: cattle-system
+  labels:
+    app: rancher
+    chart: rancher
+    heritage: Helm
+    release: rancher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rancher
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: rancher
+        release: rancher
+    spec:
+      serviceAccountName: rancher
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - rancher
+              topologyKey: kubernetes.io/hostname
+      tolerations:
+      - key: "cattle.io/os"
+        value: "linux"
+        effect: "NoSchedule"
+        operator: "Equal"
+      containers:
+      - image: rancher/rancher:v2.8.8
+        imagePullPolicy: IfNotPresent
+        name: rancher
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        - containerPort: 443
+          protocol: TCP
+        args:
+        # Rancher self-signed SSL
+        - "--http-listen-port=80"
+        - "--https-listen-port=443"
+        - "--add-local=auto"
+        env:
+        - name: CATTLE_NAMESPACE
+          value: cattle-system
+        - name: CATTLE_PEER_SERVICE
+          value: rancher
+        - name: CATTLE_BOOTSTRAP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: bootstrap-secret
+              key: bootstrapPassword
+        - name: CATTLE_SYSTEM_DEFAULT_REGISTRY
+          value: ""
+        - name: CATTLE_SERVER_URL
+          value: ""
+        - name: CATTLE_INGRESS_CLASS_NAME
+          value: "traefik"
+        - name: CATTLE_TLS_MIN_VERSION
+          value: "1.2"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /var/log/auditlog
+          name: audit-log
+        - name: tls-ca-volume
+          mountPath: /etc/rancher/ssl
+          readOnly: true
+      volumes:
+      - name: audit-log
+        hostPath:
+          path: /var/log/rancher/auditlog
+          type: DirectoryOrCreate
+      - name: tls-ca-volume
+        secret:
+          secretName: tls-rancher-ingress
+          defaultMode: 420
+          optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rancher
+  namespace: cattle-system
+  labels:
+    app: rancher
+    chart: rancher
+    heritage: Helm
+    release: rancher
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 80
+    name: http
+  - port: 443
+    protocol: TCP
+    targetPort: 443
+    name: https-internal
+  selector:
+    app: rancher
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rancher
+  namespace: cattle-system
+  labels:
+    app: rancher
+    chart: rancher
+    heritage: Helm
+    release: rancher
+  annotations:
+    cert-manager.io/issuer: rancher
+    cert-manager.io/issuer-kind: Issuer
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: cattle-system-rancher-headers@kubernetescrd
+    traefik.ingress.kubernetes.io/router.rule: Host(`RANCHER_HOSTNAME`)
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: RANCHER_HOSTNAME
+    http:
+      paths:
+      - backend:
+          service:
+            name: rancher
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - RANCHER_HOSTNAME
+    secretName: tls-rancher-ingress
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bootstrap-secret
+  namespace: cattle-system
+  labels:
+    app: rancher
+    chart: rancher
+    heritage: Helm
+    release: rancher
+type: Opaque
+data:
+  bootstrapPassword: BOOTSTRAP_PASSWORD_BASE64
+---
+# Self-signed certificate issuer for Rancher
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: rancher
+  namespace: cattle-system
+spec:
+  ca:
+    secretName: tls-rancher
+---
+# Certificate for Rancher ingress
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tls-rancher-ingress
+  namespace: cattle-system
+spec:
+  secretName: tls-rancher-ingress
+  issuerRef:
+    name: rancher
+    kind: Issuer
+  commonName: RANCHER_HOSTNAME
+  dnsNames:
+  - RANCHER_HOSTNAME
+---
+# Traefik middleware for Rancher headers
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: rancher-headers
+  namespace: cattle-system
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: "https"
+    customResponseHeaders:
+      X-Frame-Options: "SAMEORIGIN"
+      X-Content-Type-Options: "nosniff"
+      X-XSS-Protection: "1; mode=block"
+      Strict-Transport-Security: "max-age=31536000; includeSubDomains"

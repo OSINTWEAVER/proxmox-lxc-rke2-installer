@@ -1,4 +1,35 @@
 ---
+# Variable mappings for hosts.ini compatibility
+# Maps inventory variables to role internal variables for consistency
+
+# Map cluster network configuration from hosts.ini
+rke2_cluster_dns: "{{ cluster_dns | default('10.43.0.10') }}"
+rke2_cluster_domain: "{{ cluster_domain | default('cluster.local') }}"
+
+# Override default cluster/service CIDRs with hosts.ini values if provided
+rke2_cluster_cidr: "{{ [cluster_cidr] if cluster_cidr is defined else ['10.42.0.0/16'] }}"
+rke2_service_cidr: "{{ [service_cidr] if service_cidr is defined else ['10.43.0.0/16'] }}"
+
+# Map Kubernetes version from hosts.ini
+# Remove 'v' prefix if present and use for RKE2 version selection
+rke2_version: "{{ 'v' + (kubernetes_version | regex_replace('^v', '')) + '+rke2r1' if kubernetes_version is defined else 'v1.32.7+rke2r1' }}"
+
+# Map node naming configuration
+rke2_node_name_prefix: "{{ node_name_prefix | default('') }}"
+rke2_node_name: "{{ rke2_node_name_prefix + inventory_hostname if rke2_node_name_prefix else inventory_hostname }}"
+
+# Map local path provisioner settings
+rke2_use_local_path_provisioner: "{{ use_local_path_provisioner | default(false) }}"
+rke2_local_path_provisioner_path: "{{ local_path_provisioner_path | default('/opt/local-path-provisioner') }}"
+
+# Map Rancher settings 
+rke2_install_rancher: "{{ install_rancher | default(false) }}"
+rke2_rancher_hostname: "{{ rancher_hostname | default('rancher.local') }}"
+
+# Map SQLite usage from hosts.ini - will override default value below
+
+# Map kubeconfig download settings - hosts.ini variable will override this default
+
 # Determines whether downgrades of the RKE2 version are allowed.
 # If set to `false`, the role will prevent downgrades unless explicitly permitted.
 # Set to `true` to allow downgrades of the RKE2 version.
@@ -50,8 +81,8 @@ rke2_loadbalancer_ip_range: {}
 #  range-global: 192.168.1.50-192.168.1.100
 #  cidr-finance: 192.168.0.220/29,192.168.0.230/29
 
-# Install kubevip cloud provider if rke2_ha_mode_kubevip is true
-rke2_kubevip_cloud_provider_enable: true
+# Disable kubevip cloud provider for Proxmox LXC on-premises deployment
+rke2_kubevip_cloud_provider_enable: false
 
 # Enable kube-vip to watch Services of type LoadBalancer
 rke2_kubevip_svc_enable: true
@@ -110,10 +141,10 @@ rke2_agent_node_taints: []
 # Pre-shared secret token that other server or agent nodes will register with when connecting to the cluster
 rke2_token: defaultSecret12345
 
-# RKE2 version - Updated to v1.32.7+rke2r1 for Rancher compatibility
-# Kubernetes v1.32.7 with proven stability and Rancher chart support
+# RKE2 version - set via variable mapping at top of file from kubernetes_version in hosts.ini
+# Default: v1.32.7+rke2r1 for Rancher compatibility
 # Component versions: Kubernetes v1.32.7, Etcd v3.5.21-k3s1, Containerd v2.0.5-k3s2
-rke2_version: v1.32.7+rke2r1
+# (This is now set by the variable mapping at the top of the file)
 
 # URL to RKE2 repository
 rke2_channel_url: https://update.rke2.io/v1-release/channels
@@ -168,18 +199,19 @@ rke2_channel: stable
 # Do not deploy packaged components and delete any deployed components
 # Valid items: rke2-canal, rke2-coredns, rke2-ingress-nginx, rke2-metrics-server
 rke2_disable:
+  - rke2-ingress-nginx
 
 # Option to disable kube-proxy
 disable_kube_proxy: false
 
 # Option to disable builtin cloud controller when working with aws, azure, gce etc
-# For onprem environment, this should remain false and keep rke2_cloud_provider_name as "external"
+# For Proxmox LXC on-premises environment, disable cloud controller completely
 # https://docs.k3s.io/networking/networking-services#deploying-an-external-cloud-controller-manager (same for RKE2)
-rke2_disable_cloud_controller: false
+rke2_disable_cloud_controller: true
 
 # Cloud provider to use for the cluster (aws, azure, gce, openstack, vsphere, external)
-# applicable only if rke2_disable_cloud_controller is true
-rke2_cloud_provider_name: "external"
+# For Proxmox LXC deployment, set to false to disable entirely
+rke2_cloud_provider_name: false
 
 # Path to custom manifests deployed during the RKE2 installation
 # It is possible to use Jinja2 templating in the manifests
@@ -248,6 +280,7 @@ rke2_cis_profile: ""
 rke2_download_kubeconf: false
 
 # Name of the Kubernetes config file will be downloaded to the Ansible controller
+# (Default value, can be overridden in hosts.ini)
 rke2_download_kubeconf_file_name: rke2.yaml
 
 # Destination directory where the Kubernetes config file will be downloaded to the Ansible controller
@@ -371,16 +404,15 @@ rke2_containerd_socket: "/run/k3s/containerd/containerd.sock"
 # rke2_kube_proxy_arg:
 #   - "proxy-mode=ipvs"
 
-# The value for the node-name configuration item
-rke2_node_name: "{{ inventory_hostname }}"
-
-# default pod network range for rke2
-rke2_cluster_cidr:
-  - 10.42.0.0/16
-
-# default service network range for rke2
-rke2_service_cidr:
-  - 10.43.0.0/16
-
 # Enable SELinux for rke2
 rke2_selinux: false
+
+# Enable kubernetes.github.io/ingress-nginx installation (replaces RKE2 built-in)
+rke2_ingress_nginx_enabled: true
+
+# Additional Kubernetes Management Tools
+# Stern version for log tailing (installed on all nodes)
+stern_version: "1.30.0"
+
+# Helmfile version for declarative Helm deployments (installed on server nodes only)
+helmfile_version: "0.169.1"

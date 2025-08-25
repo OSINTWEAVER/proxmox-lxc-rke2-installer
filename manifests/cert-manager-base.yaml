@@ -1,14 +1,135 @@
-# cert-manager CRDs and main deployment
-# This is a streamlined version for LXC/single-node installations
+# Complete cert-manager installation for Rancher
+# Based on cert-manager v1.13.1 official manifests
 apiVersion: v1
 kind: Namespace
 metadata:
   name: cert-manager
   labels:
     name: cert-manager
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/instance: cert-manager
 ---
-# cert-manager CRDs will be applied separately via kubectl
-# Main cert-manager deployment follows Rancher documentation
+# ServiceAccount for cert-manager controller
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+  labels:
+    app: cert-manager
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/instance: cert-manager
+---
+# ServiceAccount for cert-manager cainjector
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager-cainjector
+  namespace: cert-manager
+  labels:
+    app: cert-manager-cainjector
+    app.kubernetes.io/name: cainjector
+    app.kubernetes.io/instance: cert-manager
+---
+# ServiceAccount for cert-manager webhook
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager-webhook
+  namespace: cert-manager
+  labels:
+    app: cert-manager-webhook
+    app.kubernetes.io/name: webhook
+    app.kubernetes.io/instance: cert-manager
+---
+# ClusterRole for cert-manager controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-controller-issuers
+  labels:
+    app: cert-manager
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/instance: cert-manager
+rules:
+- apiGroups: ["cert-manager.io"]
+  resources: ["issuers", "issuers/status"]
+  verbs: ["update", "patch"]
+- apiGroups: ["cert-manager.io"]
+  resources: ["issuers"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+# ClusterRole for cert-manager certificates
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-controller-certificates
+  labels:
+    app: cert-manager
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/instance: cert-manager
+rules:
+- apiGroups: ["cert-manager.io"]
+  resources: ["certificates", "certificates/status", "certificaterequests", "certificaterequests/status"]
+  verbs: ["update", "patch"]
+- apiGroups: ["cert-manager.io"]
+  resources: ["certificates", "certificaterequests", "clusterissuers", "issuers"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["cert-manager.io"]
+  resources: ["certificates/finalizers", "certificaterequests/finalizers"]
+  verbs: ["update"]
+- apiGroups: ["acme.cert-manager.io"]
+  resources: ["orders"]
+  verbs: ["create", "delete", "get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "delete", "patch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+# ClusterRoleBinding for cert-manager controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-controller-issuers
+  labels:
+    app: cert-manager
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/instance: cert-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-controller-issuers
+subjects:
+- name: cert-manager
+  namespace: cert-manager
+  kind: ServiceAccount
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-controller-certificates
+  labels:
+    app: cert-manager
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/instance: cert-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-controller-certificates
+subjects:
+- name: cert-manager
+  namespace: cert-manager
+  kind: ServiceAccount
+---
+# cert-manager controller deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,27 +139,86 @@ metadata:
     app: cert-manager
     app.kubernetes.io/name: cert-manager
     app.kubernetes.io/instance: cert-manager
+    app.kubernetes.io/component: controller
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: cert-manager
       app.kubernetes.io/instance: cert-manager
+      app.kubernetes.io/component: controller
   template:
     metadata:
       labels:
         app: cert-manager
         app.kubernetes.io/name: cert-manager
         app.kubernetes.io/instance: cert-manager
+        app.kubernetes.io/component: controller
     spec:
       serviceAccountName: cert-manager
       containers:
-      - name: cert-manager
-        image: "quay.io/jetstack/cert-manager-controller:v1.15.3"
+      - name: cert-manager-controller
+        image: "quay.io/jetstack/cert-manager-controller:v1.13.1"
         imagePullPolicy: IfNotPresent
         args:
         - --v=2
         - --cluster-resource-namespace=$(POD_NAMESPACE)
+        - --leader-election-namespace=kube-system
+        - --acme-http01-solver-image=quay.io/jetstack/cert-manager-acmesolver:v1.13.1
+        - --max-concurrent-challenges=60
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+---
+# cert-manager cainjector deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-manager-cainjector
+  namespace: cert-manager
+  labels:
+    app: cert-manager-cainjector
+    app.kubernetes.io/name: cainjector
+    app.kubernetes.io/instance: cert-manager
+    app.kubernetes.io/component: cainjector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cainjector
+      app.kubernetes.io/instance: cert-manager
+      app.kubernetes.io/component: cainjector
+  template:
+    metadata:
+      labels:
+        app: cert-manager-cainjector
+        app.kubernetes.io/name: cainjector
+        app.kubernetes.io/instance: cert-manager
+        app.kubernetes.io/component: cainjector
+    spec:
+      serviceAccountName: cert-manager-cainjector
+      containers:
+      - name: cert-manager-cainjector
+        image: "quay.io/jetstack/cert-manager-cainjector:v1.13.1"
+        imagePullPolicy: IfNotPresent
+        args:
+        - --v=2
         - --leader-election-namespace=kube-system
         env:
         - name: POD_NAMESPACE
@@ -52,13 +232,114 @@ spec:
           limits:
             cpu: 100m
             memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
 ---
-apiVersion: v1
-kind: ServiceAccount
+# cert-manager webhook deployment
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: cert-manager
+  name: cert-manager-webhook
   namespace: cert-manager
   labels:
-    app: cert-manager
-    app.kubernetes.io/name: cert-manager
+    app: cert-manager-webhook
+    app.kubernetes.io/name: webhook
     app.kubernetes.io/instance: cert-manager
+    app.kubernetes.io/component: webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook
+      app.kubernetes.io/instance: cert-manager
+      app.kubernetes.io/component: webhook
+  template:
+    metadata:
+      labels:
+        app: cert-manager-webhook
+        app.kubernetes.io/name: webhook
+        app.kubernetes.io/instance: cert-manager
+        app.kubernetes.io/component: webhook
+    spec:
+      serviceAccountName: cert-manager-webhook
+      containers:
+      - name: cert-manager-webhook
+        image: "quay.io/jetstack/cert-manager-webhook:v1.13.1"
+        imagePullPolicy: IfNotPresent
+        args:
+        - --v=2
+        - --secure-port=10250
+        - --dynamic-serving-ca-secret-namespace=$(POD_NAMESPACE)
+        - --dynamic-serving-ca-secret-name=cert-manager-webhook-ca
+        - --dynamic-serving-dns-names=cert-manager-webhook,cert-manager-webhook.cert-manager,cert-manager-webhook.cert-manager.svc
+        ports:
+        - name: https
+          protocol: TCP
+          containerPort: 10250
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: 6080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 1
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 6080
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 1
+          successThreshold: 1
+          failureThreshold: 3
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+---
+# Service for cert-manager webhook
+apiVersion: v1
+kind: Service
+metadata:
+  name: cert-manager-webhook
+  namespace: cert-manager
+  labels:
+    app: cert-manager-webhook
+    app.kubernetes.io/name: webhook
+    app.kubernetes.io/instance: cert-manager
+    app.kubernetes.io/component: webhook
+spec:
+  type: ClusterIP
+  ports:
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: https
+  selector:
+    app.kubernetes.io/name: webhook
+    app.kubernetes.io/instance: cert-manager
+    app.kubernetes.io/component: webhook

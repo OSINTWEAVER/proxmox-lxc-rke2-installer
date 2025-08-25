@@ -8,7 +8,8 @@
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
     # Wait for all system pods to be ready
     {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=300s
-    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n kube-system --timeout=300s
+    # Wait for our custom ingress-nginx instead of Traefik
+    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=ingress-nginx -n ingress-nginx --timeout=300s
     # Verify cluster is responsive
     {{ rke2_data_path }}/bin/kubectl get nodes --no-headers | wc -l
   register: cluster_readiness_check
@@ -18,109 +19,101 @@
   args:
     executable: /bin/bash
 
-- name: Add cert-manager Helm repository
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    /usr/local/bin/helm repo add jetstack https://charts.jetstack.io
-    /usr/local/bin/helm repo update
-  args:
-    executable: /bin/bash
-  register: cert_manager_repo_result
+- name: Apply cert-manager CRDs
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'manifests/cert-manager-crds.yaml') | from_yaml_all | list }}"
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+  register: cert_manager_crds_result
   retries: 3
   delay: 10
-  until: cert_manager_repo_result.rc == 0
 
-- name: Install cert-manager with optimized settings for LXC
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    /usr/local/bin/helm upgrade --install cert-manager jetstack/cert-manager \
-      --namespace cert-manager \
-      --create-namespace \
-      --version v1.15.3 \
-      --set crds.enabled=true \
-      --set prometheus.enabled=false \
-      --set resources.requests.cpu=50m \
-      --set resources.requests.memory=64Mi \
-      --set resources.limits.cpu=200m \
-      --set resources.limits.memory=256Mi \
-      --set webhook.resources.requests.cpu=10m \
-      --set webhook.resources.requests.memory=32Mi \
-      --set webhook.resources.limits.cpu=50m \
-      --set webhook.resources.limits.memory=128Mi \
-      --set cainjector.resources.requests.cpu=10m \
-      --set cainjector.resources.requests.memory=64Mi \
-      --set cainjector.resources.limits.cpu=100m \
-      --set cainjector.resources.limits.memory=256Mi \
-      --timeout=300s \
-      --wait
-  args:
-    executable: /bin/bash
+- name: Install cert-manager using manifests
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'manifests/cert-manager-base.yaml') | from_yaml_all | list }}"
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
   register: cert_manager_install
   retries: 2
   delay: 30
-  until: cert_manager_install.rc == 0
 
-- name: Verify cert-manager installation
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    echo "=== cert-manager pods status ==="
-    {{ rke2_data_path }}/bin/kubectl get pods -n cert-manager
-    echo ""
-    echo "=== Waiting for cert-manager pods to be ready ==="
-    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=cert-manager -n cert-manager --timeout=180s
-    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=cainjector -n cert-manager --timeout=180s
-    {{ rke2_data_path }}/bin/kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=webhook -n cert-manager --timeout=180s
-    echo "cert-manager is ready!"
-  args:
-    executable: /bin/bash
+- name: Verify cert-manager installation using kubectl
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: cert-manager
+    namespace: cert-manager
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 180
+  register: cert_manager_status
 
-- name: Add Rancher Helm repository
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    /usr/local/bin/helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
-    /usr/local/bin/helm repo update
-  args:
-    executable: /bin/bash
-  register: rancher_repo_result
-  retries: 3
-  delay: 10
-  until: rancher_repo_result.rc == 0
+- name: Verify cert-manager webhook is ready
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: cert-manager-webhook
+    namespace: cert-manager
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 180
 
-- name: Create cattle-system namespace for Rancher
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    {{ rke2_data_path }}/bin/kubectl create namespace cattle-system --dry-run=client -o yaml | {{ rke2_data_path }}/bin/kubectl apply -f -
-  args:
-    executable: /bin/bash
+- name: Verify cert-manager cainjector is ready
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: cert-manager-cainjector
+    namespace: cert-manager
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 180
 
-- name: Install Rancher following official documentation (compatible with current K8s version)
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    /usr/local/bin/helm install rancher rancher-stable/rancher \
-      --namespace cattle-system \
-      --set hostname="{{ rancher_hostname }}" \
-      --set bootstrapPassword="{{ rancher_bootstrap_password }}" \
-      --set replicas=1 \
-      --set ingress.tls.source=rancher \
-      --set resources.requests.cpu=250m \
-      --set resources.requests.memory=512Mi \
-      --set resources.limits.cpu=500m \
-      --set resources.limits.memory=1Gi \
-      --set extraEnv[0].name=CATTLE_SYSTEM_DEFAULT_REGISTRY \
-      --set extraEnv[0].value="" \
-      --set useBundledSystemChart=true \
-      --timeout=600s \
-      --wait
-  args:
-    executable: /bin/bash
+- name: Generate bootstrap password base64 for Rancher secret
+  ansible.builtin.set_fact:
+    rancher_bootstrap_password_b64: "{{ rancher_bootstrap_password | b64encode }}"
+
+- name: Process Rancher manifest template
+  ansible.builtin.set_fact:
+    rancher_manifest_content: "{{ lookup('file', 'manifests/rancher-base.yaml') | replace('RANCHER_HOSTNAME', rancher_hostname) | replace('BOOTSTRAP_PASSWORD_BASE64', rancher_bootstrap_password_b64) }}"
+
+- name: Install Rancher using manifests
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ rancher_manifest_content | from_yaml_all | list }}"
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 600
   register: rancher_install_result
 
 - name: Wait for Rancher deployment to be ready
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    {{ rke2_data_path }}/bin/kubectl -n cattle-system rollout status deploy/rancher --timeout=600s
-  args:
-    executable: /bin/bash
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: rancher
+    namespace: cattle-system
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 600
 
 - name: Get comprehensive Rancher deployment status
   ansible.builtin.shell: |
@@ -146,8 +139,8 @@
     echo "=== All cattle-system resources ==="
     {{ rke2_data_path }}/bin/kubectl get all -n cattle-system
     echo ""
-    echo "=== Traefik Ingress Controller Status ==="
-    {{ rke2_data_path }}/bin/kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
+    echo "=== NGINX Ingress Controller Status ==="
+    {{ rke2_data_path }}/bin/kubectl get pods -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx -o wide
   args:
     executable: /bin/bash
   register: rancher_status
@@ -283,7 +276,7 @@
       kubectl get secrets -n cattle-system
       
       # Ingress controller status
-      kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
+      kubectl get pods -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
       ```
     dest: "{{ playbook_dir | default('/tmp') }}/../rancher-access-info.md"
   delegate_to: localhost

@@ -16,10 +16,9 @@
     # Check for GPU nodes using hostname pattern or explicit is_gpu_node variable
     has_gpu_nodes: "{{ (groups['all'] | map('extract', hostvars, 'inventory_hostname') | select('match', '.*' + gpu_detection_pattern + '.*') | list | length > 0) or (groups['all'] | map('extract', hostvars, 'is_gpu_node') | select('defined') | select() | list | length > 0) }}"
 
-    rke2_custom_manifests: >-
-      {{
-        ( [ playbook_dir + '/../manifests/local-path-provisioner.yaml' ] if use_local_path_provisioner else [] )
-      }}
+    # Custom manifests for core cluster functionality
+    # Local-path-provisioner is REQUIRED for LXC deployments with storage
+    rke2_custom_manifests: "{{ ['../manifests/local-path-provisioner.yaml'] if (use_local_path_provisioner | default(false) | bool) else [] }}"
 
     # Removed CriticalAddonsOnly taint as it prevents CNI daemonsets from scheduling
     # rke2_server_node_taints:
@@ -1046,6 +1045,19 @@
         create: yes
 
   post_tasks:
+    - name: Check for unreachable nodes and display warning
+      debug:
+        msg: |
+          ⚠️  WARNING: Some nodes may be unreachable due to network connectivity issues.
+          This is common with poor SSH connections and does not necessarily indicate deployment failure.
+          
+          Deployment will continue with available nodes.
+          
+          To check node status after deployment:
+          kubectl get nodes -o wide
+      run_once: true
+      when: ansible_play_hosts | length != groups['all'] | length
+
     - name: Verify storage paths on all nodes before local-path-provisioner
       shell: |
         echo "Node: {{ inventory_hostname }}"
@@ -1065,11 +1077,18 @@
         fi
       register: storage_verification
       when: use_local_path_provisioner | bool
+      ignore_unreachable: true
+      retries: 3
+      delay: 10
 
     - name: Display storage verification results
       debug:
         msg: "{{ storage_verification.stdout_lines }}"
-      when: use_local_path_provisioner | bool
+      when: 
+        - use_local_path_provisioner | bool
+        - storage_verification is defined
+        - storage_verification.stdout_lines is defined
+      ignore_unreachable: true
 
     - name: Debug custom manifests configuration
       debug:
@@ -1136,12 +1155,20 @@
         {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get deployment local-path-provisioner -n local-path-storage
       when: rke2_type == 'server' and (use_local_path_provisioner | bool)
       register: lpp_deployment_wait
+      retries: 2
+      delay: 30
+      failed_when: false
 
     - name: Wait for local-path-provisioner to be ready
       shell: |
         {{ rke2_data_path }}/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=300s
-      when: rke2_type == 'server' and (use_local_path_provisioner | bool)
+      when: 
+        - rke2_type == 'server' 
+        - (use_local_path_provisioner | bool) 
+        - lpp_deployment_wait.rc == 0
       register: lpp_wait_result
+      retries: 2
+      delay: 60
       failed_when: false
 
     - name: Check local-path-provisioner pod status if wait failed
@@ -1169,13 +1196,20 @@
     - name: Fail deployment if local-path-provisioner is not ready after extended timeout
       fail:
         msg: |
-          Local Path Provisioner failed to become ready within 10 minutes.
+          Local Path Provisioner failed to become ready within the timeout period.
           This may indicate:
           1. /mnt/data volume not properly mounted on worker nodes
           2. Network issues preventing pod scheduling
           3. Resource constraints preventing pod startup
+          
+          The deployment will continue, but storage functionality may be limited.
           Check the debug information above for details.
-      when: rke2_type == 'server' and (use_local_path_provisioner | bool) and lpp_wait_result.rc != 0
+      when: 
+        - rke2_type == 'server' 
+        - (use_local_path_provisioner | bool) 
+        - lpp_wait_result is defined
+        - lpp_wait_result.rc != 0
+        - fail_on_storage_issues | default(false) | bool
 
     - name: Create .kube directory for {{ cluster_admin_user }} user
       file:
@@ -1380,9 +1414,6 @@
           {% if has_gpu_nodes %}
           - ✅ **NVIDIA Container Toolkit**: Handled by RKE2 role for GPU workloads
           {% endif %}
-          {% if install_rancher | default(false) | bool %}
-          - ✅ **Rancher UI**: Available at https://{{ rancher_hostname }}
-          {% endif %}
         dest: "{{ playbook_dir }}/../cluster-access-info.md"
       when: rke2_type == 'server'
       delegate_to: localhost
@@ -1390,15 +1421,6 @@
       vars:
         ansible_connection: local
         ansible_become: false
-
-    # ===== RANCHER INSTALLATION (FINAL STEP) =====
-    # Install Rancher Management UI after ALL cluster components are verified and ready
-    - name: Install Rancher Management UI (final step after all cluster verification)
-      ansible.builtin.include_tasks: ../ansible-role-rke2/tasks/rancher.yml
-      when: 
-        - install_rancher | default(false) | bool
-        - inventory_hostname == groups['rke2_servers'][0]
-        - rke2_type == 'server'
 
   roles:
     - role: ../ansible-role-rke2
