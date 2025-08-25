@@ -8,6 +8,7 @@ kubeconfs/
 # Inventory files (except templates and examples)
 hosts.ini
 hosts_proxmox.ini
+hosts-iris.ini
 
 *tar.gz
 *.log
@@ -22,4 +23,6 @@ hosts_proxmox.ini
 push-to-github.sh
 *.pem
 
-lxc_map.yml
+# Ignore sensitive Proxmox LXC maps (keep template tracked)
+proxmox/vars/lxc_map*.yml
+!proxmox/vars/lxc_map_template.yml

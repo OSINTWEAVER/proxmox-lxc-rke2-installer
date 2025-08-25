@@ -43,19 +43,10 @@
       ansible.builtin.debug:
         msg: "{{ zfs_destroy.stdout_lines | default(['ZFS volume did not exist']) }}"
 
-- name: Clean up directory mount (if exists) 
+- name: Skip deletion of host directory mounts (safety)
   when: mount.type == "directory"
-  block:
-    - name: Remove directory mount point
-      ansible.builtin.file:
-        path: "{{ mount.host_path }}"
-        state: absent
-      register: dir_cleanup
-
-    - name: Report directory cleanup
-      ansible.builtin.debug:
-        msg: "Removed directory: {{ mount.host_path }}"
-      when: dir_cleanup.changed
+  ansible.builtin.debug:
+    msg: "Safety: NOT deleting host directory mount {{ mount.host_path }}. Detach from containers only."
 
 - name: Stub for LVM cleanup (not implemented)
   when: mount.type == "lvm_lv"

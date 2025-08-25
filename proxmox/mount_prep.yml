@@ -4,7 +4,7 @@
 # - parent loop var: item -> container dict
 # - this loop var: mount -> one mount dict
 # mount schema:
-#   type: zfs_volume | directory | lvm_lv
+#   type: zfs_volume | directory | lvm_lv | storage
 #   container_path: /mnt/data
 #   For zfs_volume:
 #     name: vm-101-data
@@ -19,6 +19,9 @@
 #     lv: lvname
 #     size: 50G         # optional, if creation supported later
 #     fstype: ext4
+#   For storage (use Proxmox storage:<size> mapping, no formatting here):
+#     storage: local-lvm
+#     size: 3T
 
 - name: Ensure mount prerequisites for container {{ item.id }} ({{ item.hostname }})
   vars:

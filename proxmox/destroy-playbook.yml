@@ -3,10 +3,19 @@
   hosts: proxmox_hosts
   gather_facts: yes
   become: yes
-  vars_files:
-    - vars/lxc_map.yml
+  vars:
+    lxc_map_file: vars/lxc_map.yml
+    # Safety: do NOT delete host directory mounts by default
+    destroy_host_directory_mounts: false
+    # Only allow deletion of directories under these prefixes when enabled
+    directory_delete_allowlist:
+      - /var/lib/vz/data/
 
   tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
     - name: Assert running on Debian (Proxmox)
       ansible.builtin.assert:
         that:

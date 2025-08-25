@@ -28,7 +28,8 @@ cd proxmox-lxc-rke2-installer
 - Copy `inventories/hosts_proxmox_template.ini` to `inventories/hosts_proxmox.ini` and edit to match your Proxmox hosts.
 
 3) Configure LXC map:
-- Copy `proxmox/vars/lxc_map_template.yml` to `proxmox/vars/lxc_map.yml` and edit:
+- Default map file used by the playbooks is `proxmox/vars/lxc_map.yml`.
+- Copy `proxmox/vars/lxc_map_template.yml` to `proxmox/vars/lxc_map.yml` and edit (or create variants like `lxc_map_lab.yml`, `lxc_map_prod.yml`):
   - Set `ssh.username` and `ssh.password`
   - Set `storage_defaults` or per-mount overrides
   - Mark `gpu: true` for GPU nodes and set `nvidia.driver_host_path` globally or per node
@@ -46,10 +47,16 @@ This script uses `sshpass` and will prompt for the root password of the provided
 
 ## Run
 
-In WSL2, execute the Ansible playbook against your Proxmox hosts:
+Default (uses `proxmox/vars/lxc_map.yml`):
 
 ```
 ansible-playbook -i inventories/hosts_proxmox.ini proxmox/proxmox-playbook.yml
+```
+
+Use a different map (e.g., `proxmox/vars/lxc_map_lab.yml`):
+
+```
+ansible-playbook -i inventories/hosts_proxmox.ini proxmox/proxmox-playbook.yml -e lxc_map_file=proxmox/vars/lxc_map_lab.yml
 ```
 
 What it does:
@@ -74,4 +81,38 @@ bash ./trust_ssh_hosts.sh nodes 10.14.100.1 10.14.100.2 10.14.100.3
 ## Tips
 - You can mix mount types: `zfs_volume`, `directory`, and `lvm_lv` (stub). For `directory`, ensure the host path exists.
 - To use a different ZFS pool per host or node, set `pool` on the specific mount.
-- Passwords are kept out of version control by ignoring `proxmox/vars/lxc_map.yml`.
+- Passwords are kept out of version control by ignoring `proxmox/vars/lxc_map*.yml` (template remains tracked).
+
+Selecting a different map (summary)
+- Provision:
+  - ansible-playbook -i inventories/hosts_proxmox.ini proxmox/proxmox-playbook.yml -e lxc_map_file=proxmox/vars/lxc_map_lab.yml
+- Destroy:
+  - ansible-playbook -i inventories/hosts_proxmox.ini proxmox/destroy-playbook.yml -e lxc_map_file=proxmox/vars/lxc_map_lab.yml
+
+Destroying with a different map
+- Quick helper script (now supports --map):
+  - Preview: `bash proxmox/destroy.sh --map proxmox/vars/lxc_map_lab.yml`
+  - Confirmed: `bash proxmox/destroy.sh --confirm --map proxmox/vars/lxc_map_lab.yml`
+- Or run the playbook directly:
+  - ansible-playbook -i inventories/hosts_proxmox.ini proxmox/destroy-playbook.yml -e lxc_map_file=proxmox/vars/lxc_map_lab.yml
+
+Beginner-friendly flow (example)
+1) Copy template to your default map and edit it:
+  - `cp proxmox/vars/lxc_map_template.yml proxmox/vars/lxc_map.yml`
+2) Provision using the default map:
+  - `ansible-playbook -i inventories/hosts_proxmox.ini proxmox/proxmox-playbook.yml`
+3) Later, create a lab variant and use it:
+  - `cp proxmox/vars/lxc_map.yml proxmox/vars/lxc_map_lab.yml` (edit as needed)
+  - Provision: `ansible-playbook -i inventories/hosts_proxmox.ini proxmox/proxmox-playbook.yml -e lxc_map_file=proxmox/vars/lxc_map_lab.yml`
+  - Destroy: `bash proxmox/destroy.sh --confirm --map proxmox/vars/lxc_map_lab.yml`
+
+Securing secrets with Ansible Vault (optional)
+- Option A: Encrypt the entire map file
+  - ansible-vault encrypt proxmox/vars/lxc_map_prod.yml
+  - You’ll be prompted for a vault password when running the playbook.
+- Option B: Keep a separate encrypted secrets file and reference from your map
+  - ansible-vault create proxmox/vars/lxc_secrets.yml
+  - In your map, reference values via Jinja, for example:
+    - `password: "{{ lxc_secrets.proxmox_password }}"`
+  - Load the secrets alongside your map:
+    - ansible-playbook ... -e lxc_map_file=proxmox/vars/lxc_map_lab.yml -e @proxmox/vars/lxc_secrets.yml
