@@ -1,0 +1,66 @@
+---
+# Prepare a single mount for a container based on proxmox_cluster.containers[*].mounts entries
+# Expected item context:
+# - parent loop var: item -> container dict
+# - this loop var: mount -> one mount dict
+# mount schema:
+#   type: zfs_volume | directory | lvm_lv | storage
+#   container_path: /mnt/data
+#   For zfs_volume:
+#     name: vm-101-data
+#     size: 50G
+#     pool: temp-pool   # optional, defaults to proxmox_cluster.storage_defaults.zfs_pool
+#     fstype: ext4      # optional, default ext4
+#   For directory:
+#     host_path: /mnt/data
+#     create: true      # optional
+#   For lvm_lv:
+#     vg: vgname
+#     lv: lvname
+#     size: 50G         # optional, if creation supported later
+#     fstype: ext4
+#   For storage (use Proxmox storage:<size> mapping, no formatting here):
+#     storage: local-lvm
+#     size: 3T
+
+- name: "Ensure mount prerequisites for container {{ item.id }} ({{ item.hostname }})"
+  vars:
+    zfs_pool: "{{ mount.pool | default(proxmox_cluster.storage_defaults.zfs_pool | default('')) }}"
+    fstype: "{{ mount.fstype | default('ext4') }}"
+  block:
+    - name: Prepare ZFS volume when type=zfs_volume
+      when: mount.type == 'zfs_volume'
+      block:
+        - name: Check if ZFS volume exists
+          ansible.builtin.shell: |
+            zfs list -H -o name {{ zfs_pool }}/{{ mount.name }}
+          args:
+            executable: /bin/bash
+          register: zvol_check
+          failed_when: false
+          changed_when: false
+
+        - name: Create ZFS volume (sparse)
+          ansible.builtin.shell: |
+            zfs create -V {{ mount.size }} -s {{ zfs_pool }}/{{ mount.name }}
+          args:
+            executable: /bin/bash
+          when: zvol_check.rc != 0
+
+        - name: Ensure filesystem exists on the zvol
+          ansible.builtin.shell: |
+            blkid /dev/zvol/{{ zfs_pool }}/{{ mount.name }} || mkfs.{{ fstype }} /dev/zvol/{{ zfs_pool }}/{{ mount.name }} -F
+          args:
+            executable: /bin/bash
+
+    - name: Prepare directory when type=directory
+      when: mount.type == 'directory'
+      ansible.builtin.file:
+        path: "{{ mount.host_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Stub for LVM LV creation (not implemented)
+      when: mount.type == 'lvm_lv'
+      ansible.builtin.debug:
+        msg: "lvm_lv mount type referenced for {{ item.hostname }} at {{ mount.container_path }}; ensure LV {{ mount.vg }}/{{ mount.lv }} exists and has filesystem {{ fstype }}."

@@ -20,3 +20,9 @@ hosts.ini
 *.orig
 push-to-github.sh
 *.pem
+
+
+hosts-iris.ini
+hosts-octostar.ini
+lxc_map_iris.yml
+lxc_map_octostar.yml

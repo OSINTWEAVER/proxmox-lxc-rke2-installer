@@ -1,0 +1,54 @@
+---
+# proxmox-storage-cleanup.yml - Clean up storage volumes/directories
+# Called with variables: item (container), mount (mount config)
+
+- name: "Cleaning up mount: {{ mount.name | default(mount.host_path | default('unnamed')) }} for container {{ item.id }}"
+  ansible.builtin.debug:
+    msg: "Cleaning up mount: {{ mount.name | default(mount.host_path | default('unnamed')) }} for container {{ item.id }}"
+
+- name: Destroy ZFS volume (if exists)
+  when: mount.type == "zfs_volume"
+  block:
+    - name: Get ZFS pool for this mount
+      ansible.builtin.set_fact:
+        zfs_pool: "{{ mount.pool | default(proxmox_cluster.storage_defaults.zfs_pool) }}"
+        zvol_path: "{{ mount.pool | default(proxmox_cluster.storage_defaults.zfs_pool) }}/{{ mount.name }}"
+
+    - name: Check if ZFS volume exists before destroying
+      ansible.builtin.shell: |
+        if zfs list {{ zvol_path }} >/dev/null 2>&1; then
+          echo "ZFS volume {{ zvol_path }} exists"
+          exit 0
+        else
+          echo "ZFS volume {{ zvol_path }} does not exist"
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      register: zfs_check
+      failed_when: false
+      changed_when: false
+
+    - name: Destroy ZFS volume
+      when: zfs_check.rc == 0
+      ansible.builtin.shell: |
+        echo "Destroying ZFS volume {{ zvol_path }}"
+        zfs destroy {{ zvol_path }} -f
+      args:
+        executable: /bin/bash
+      register: zfs_destroy
+      changed_when: true
+
+    - name: Report ZFS volume destruction
+      ansible.builtin.debug:
+        msg: "{{ zfs_destroy.stdout_lines | default(['ZFS volume did not exist']) }}"
+
+- name: Skip deletion of host directory mounts (safety)
+  when: mount.type == "directory"
+  ansible.builtin.debug:
+    msg: "Safety: NOT deleting host directory mount {{ mount.host_path }}. Detach from containers only."
+
+- name: Stub for LVM cleanup (not implemented)
+  when: mount.type == "lvm_lv"
+  ansible.builtin.debug:
+    msg: "LVM cleanup not implemented for {{ mount.name | default('unnamed LV') }} - manual cleanup required"

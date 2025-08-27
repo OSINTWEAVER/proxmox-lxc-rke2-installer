@@ -1,0 +1,66 @@
+---
+# Copy this file to playbooks/proxmox-vars/lxc_map.yml and fill in the values.
+# This file is intentionally safe to commit; the filled version should be git-ignored.
+
+proxmox_cluster:
+  template: /var/lib/vz/template/cache/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+  bridge: vmbr0
+  vlan_tag: 14
+  gateway: 10.14.1.1
+
+  storage_defaults:
+    zfs_pool: temp-pool         # default pool for zfs_volume mounts
+    rootfs: local-lvm:60        # default rootfs storage
+
+  ssh:
+    username: adm4n             # container admin user to create
+    password: CHANGE_ME         # set a strong password
+
+  nvidia:
+    driver_host_path: ""        # e.g., /root/NVIDIA-Linux-x86_64-575.64.05.run on the Proxmox host
+    driver_dest_path: "/root"   # where to copy in the container
+
+  containers:
+    - id: 101
+      host: 10.0.10.8
+      hostname: os-env-cp-1
+      ip: 10.14.100.1/16
+      memory: 16384
+      cores: 2
+      rootfs: "{{ proxmox_cluster.storage_defaults.rootfs }}"
+      mounts:
+        - type: zfs_volume
+          name: vm-101-data
+          size: 50G
+          container_path: /mnt/data
+      gpu: false
+
+    - id: 102
+      host: 10.0.10.1
+      hostname: os-env-gpu-1
+      ip: 10.14.100.2/16
+      memory: 131072
+      cores: 24
+      rootfs: "{{ proxmox_cluster.storage_defaults.rootfs }}"
+      mounts:
+        - type: zfs_volume
+          name: vm-102-data
+          size: 3T
+          container_path: /mnt/data
+      gpu: true
+      # nvidia_driver_host_path: /root/NVIDIA-Linux-x86_64-575.64.05.run
+
+    - id: 103
+      host: 10.0.10.2
+      hostname: os-env-gpu-2
+      ip: 10.14.100.3/16
+      memory: 131072
+      cores: 24
+      rootfs: "{{ proxmox_cluster.storage_defaults.rootfs }}"
+      mounts:
+        - type: zfs_volume
+          name: vm-103-data
+          size: 3T
+          container_path: /mnt/data
+      gpu: true
+      # nvidia_driver_host_path: /root/NVIDIA-Linux-x86_64-575.64.05.run

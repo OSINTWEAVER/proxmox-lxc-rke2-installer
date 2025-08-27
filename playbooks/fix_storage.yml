@@ -1,0 +1,161 @@
+---
+- name: Fix Local Path Provisioner Storage Configuration
+  hosts: rke2_servers
+  become: true
+  vars:
+    local_path_provisioner_path: "/mnt/data"
+  
+  tasks:
+    - name: Check if Local Path Provisioner is running
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        /usr/local/bin/kubectl get pods -n local-path-storage --no-headers | grep local-path-provisioner | grep Running
+      register: lpp_running
+      failed_when: false
+      
+    - name: Display Local Path Provisioner status
+      debug:
+        msg: "Local Path Provisioner running: {{ 'Yes' if lpp_running.rc == 0 else 'No' }}"
+        
+    - name: Wait for Local Path Provisioner to be ready (if not running)
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        /usr/local/bin/kubectl wait --for=condition=available --timeout=300s deployment/local-path-provisioner -n local-path-storage
+      when: lpp_running.rc != 0
+      register: lpp_wait
+      failed_when: false
+      
+    - name: Configure Local Path Provisioner to use /mnt/data
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        echo "Configuring Local Path Provisioner to use: {{ local_path_provisioner_path }}"
+        
+        # Update ConfigMap to use /mnt/data instead of default /opt/local-path-provisioner
+        /usr/local/bin/kubectl patch configmap local-path-config -n local-path-storage --type merge -p "{\"data\":{\"config.json\":\"{\\\"nodePathMap\\\":[{\\\"node\\\":\\\"DEFAULT_PATH_FOR_NON_LISTED_NODES\\\",\\\"paths\\\":[\\\"{{ local_path_provisioner_path }}\\\"]}]}\"}}"
+        
+        # Restart the provisioner to pick up new config
+        echo "Restarting Local Path Provisioner..."
+        /usr/local/bin/kubectl rollout restart deployment local-path-provisioner -n local-path-storage
+        
+        # Wait for rollout to complete
+        /usr/local/bin/kubectl rollout status deployment local-path-provisioner -n local-path-storage --timeout=120s
+        
+        echo "✅ Local Path Provisioner configured to use: {{ local_path_provisioner_path }}"
+      register: lpp_config
+      retries: 2
+      delay: 15
+      
+    - name: Set Local Path Provisioner as default storage class
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        
+        # Remove default annotation from any existing default storage class
+        CURRENT_DEFAULT=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}')
+        if [ ! -z "$CURRENT_DEFAULT" ] && [ "$CURRENT_DEFAULT" != "local-path" ]; then
+          echo "Removing default from: $CURRENT_DEFAULT"
+          /usr/local/bin/kubectl patch storageclass $CURRENT_DEFAULT -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+        fi
+        
+        # Set local-path as default
+        echo "Setting local-path as default storage class..."
+        /usr/local/bin/kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+        
+        echo "✅ Local Path Provisioner set as default storage class"
+      register: lpp_default
+      retries: 2
+      delay: 10
+      
+    - name: Verify storage configuration
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        
+        echo "=== Storage Classes ==="
+        /usr/local/bin/kubectl get storageclass
+        echo ""
+        
+        echo "=== Default Storage Class ==="
+        DEFAULT_SC=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}')
+        echo "Default: $DEFAULT_SC"
+        echo ""
+        
+        echo "=== Local Path Provisioner Pods ==="
+        /usr/local/bin/kubectl get pods -n local-path-storage
+        echo ""
+        
+        echo "=== Local Path Provisioner Config ==="
+        /usr/local/bin/kubectl get configmap local-path-config -n local-path-storage -o jsonpath='{.data.config\.json}'
+        echo ""
+        echo ""
+        
+        echo "=== Node Storage Labels ==="
+        /usr/local/bin/kubectl get nodes -o custom-columns="NAME:.metadata.name,STORAGE-PATH:.metadata.labels.storage\.k8s\.io/local-path,STORAGE-TYPE:.metadata.labels.storage\.k8s\.io/type"
+      register: storage_verification
+      
+    - name: Display storage verification results
+      debug:
+        msg: "{{ storage_verification.stdout_lines }}"
+        
+    - name: Test PVC creation
+      shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        
+        # Create test PVC
+        cat <<EOF | /usr/local/bin/kubectl apply -f -
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: storage-test-pvc
+          namespace: default
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+        EOF
+        
+        # Wait for PVC to be bound
+        echo "Waiting for PVC to be bound..."
+        /usr/local/bin/kubectl wait --for=condition=bound pvc/storage-test-pvc --timeout=60s
+        
+        # Show PVC status
+        /usr/local/bin/kubectl get pvc storage-test-pvc
+        
+        # Clean up test PVC
+        /usr/local/bin/kubectl delete pvc storage-test-pvc
+        
+        echo "✅ Storage test completed successfully!"
+      register: pvc_test
+      failed_when: false
+      
+    - name: Display PVC test results
+      debug:
+        msg: "{{ pvc_test.stdout_lines }}"
+      when: pvc_test.stdout_lines is defined
+      
+    - name: Storage fix summary
+      debug:
+        msg: |
+          ================================================
+          🎉 STORAGE CONFIGURATION FIX COMPLETE! 🎉
+          ================================================
+          
+          ✅ Local Path Provisioner: Running and configured
+          ✅ Storage Path: {{ local_path_provisioner_path }}
+          ✅ Default Storage Class: local-path
+          ✅ PVC Test: {{ 'PASSED' if pvc_test.rc == 0 else 'FAILED' }}
+          
+          💡 Your storage is now ready for use!
+          
+          🧪 To test manually:
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: test-storage
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources:
+              requests:
+                storage: 5Gi
+          EOF

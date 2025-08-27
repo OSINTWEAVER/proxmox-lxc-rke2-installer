@@ -1,0 +1,90 @@
+---
+- name: Destroy LXC containers and storage on Proxmox hosts (Debian)
+  hosts: proxmox_hosts
+  gather_facts: true
+  become: true
+  vars:
+    lxc_map_file: proxmox-vars/lxc_map.yml
+    # Safety: do NOT delete host directory mounts by default
+    destroy_host_directory_mounts: false
+    # Only allow deletion of directories under these prefixes when enabled
+    directory_delete_allowlist:
+      - /var/lib/vz/data/
+
+  tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "This playbook only runs on Debian-based Proxmox hosts"
+
+    - name: Show containers to be destroyed on this host
+      ansible.builtin.debug:
+        var: proxmox_cluster.containers | selectattr('host', 'equalto', inventory_hostname) | list
+
+    - name: Stop containers forcefully
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        if pct status {{ item.id }} 2>/dev/null | grep -q running; then
+          echo "Stopping container {{ item.id }}"
+          pct stop {{ item.id }} --timeout 10 || pct stop {{ item.id }} --force
+        else
+          echo "Container {{ item.id }} already stopped or doesn't exist"
+        fi
+      args:
+        executable: /bin/bash
+      register: stop_result
+      changed_when: "'Stopping container' in stop_result.stdout"
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Destroy LXC containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        if pct list | grep -q "^{{ item.id }} "; then
+          echo "Destroying container {{ item.id }}"
+          pct destroy {{ item.id }} --force
+        else
+          echo "Container {{ item.id }} doesn't exist"
+        fi
+      args:
+        executable: /bin/bash
+      register: destroy_result
+      changed_when: "'Destroying container' in destroy_result.stdout"
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Clean up storage for this host's containers
+      ansible.builtin.include_tasks: proxmox-storage-cleanup.yml
+      when: item.host == inventory_hostname and (item.mounts is defined)
+      loop: "{{ proxmox_cluster.containers | subelements('mounts', skip_missing=True) }}"
+      loop_control:
+        loop_var: item_mount
+      vars:
+        item: "{{ item_mount.0 }}"
+        mount: "{{ item_mount.1 }}"
+
+    - name: Clean up host directories that may be left behind
+      when: item.host == inventory_hostname
+      ansible.builtin.file:
+        path: "/var/lib/vz/data/vm-{{ item.id }}-data"
+        state: absent
+      loop: "{{ proxmox_cluster.containers }}"
+      failed_when: false
+
+    - name: Show final container status
+      ansible.builtin.shell: |
+        echo "=== Remaining containers on {{ inventory_hostname }} ==="
+        pct list || echo "No containers found"
+      args:
+        executable: /bin/bash
+      register: final_status
+      changed_when: false
+
+    - name: Print cleanup summary
+      ansible.builtin.debug:
+        msg: "{{ final_status.stdout_lines }}"
