@@ -1,0 +1,114 @@
+---
+- name: Setup common Helm repositories on RKE2 servers
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+  vars:
+    admin_user: "{{ cluster_admin_user | default('adm4n') }}"
+
+  tasks:
+    # ===== ADD ESSENTIAL HELM REPOSITORIES =====
+    
+    - name: Add stable Helm repository
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo add stable https://charts.helm.sh/stable
+      become_user: "{{ admin_user }}"
+      register: stable_repo
+      failed_when: false
+      changed_when: "'already exists' not in stable_repo.stderr"
+
+    - name: Add Bitnami Helm repository
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo add bitnami https://charts.bitnami.com/bitnami
+      become_user: "{{ admin_user }}"
+      register: bitnami_repo
+      failed_when: false
+      changed_when: "'already exists' not in bitnami_repo.stderr"
+
+    - name: Add Jetstack Helm repository (cert-manager)
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo add jetstack https://charts.jetstack.io
+      become_user: "{{ admin_user }}"
+      register: jetstack_repo
+      failed_when: false
+      changed_when: "'already exists' not in jetstack_repo.stderr"
+
+    - name: Add MetalLB Helm repository
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo add metallb https://metallb.github.io/metallb
+      become_user: "{{ admin_user }}"
+      register: metallb_repo
+      failed_when: false
+      changed_when: "'already exists' not in metallb_repo.stderr"
+
+    - name: Add Ingress NGINX Helm repository
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+      become_user: "{{ admin_user }}"
+      register: ingress_nginx_repo
+      failed_when: false
+      changed_when: "'already exists' not in ingress_nginx_repo.stderr"
+
+    - name: Add Prometheus Community Helm repository
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      become_user: "{{ admin_user }}"
+      register: prometheus_repo
+      failed_when: false
+      changed_when: "'already exists' not in prometheus_repo.stderr"
+
+    # ===== UPDATE HELM REPOSITORIES =====
+
+    - name: Update all Helm repositories
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo update
+      become_user: "{{ admin_user }}"
+      register: helm_update
+      changed_when: true
+
+    # ===== VERIFICATION =====
+
+    - name: List available Helm repositories
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo list
+      become_user: "{{ admin_user }}"
+      register: helm_repo_list
+      changed_when: false
+
+    - name: Display Helm repository setup results
+      ansible.builtin.debug:
+        msg: |
+          ===== HELM REPOSITORY SETUP RESULTS =====
+          
+          Repository addition status:
+          - stable: {{ 'Added' if stable_repo.changed else 'Already exists' }}
+          - bitnami: {{ 'Added' if bitnami_repo.changed else 'Already exists' }}
+          - jetstack: {{ 'Added' if jetstack_repo.changed else 'Already exists' }}
+          - metallb: {{ 'Added' if metallb_repo.changed else 'Already exists' }}
+          - ingress-nginx: {{ 'Added' if ingress_nginx_repo.changed else 'Already exists' }}
+          - prometheus-community: {{ 'Added' if prometheus_repo.changed else 'Already exists' }}
+          
+          Helm repo update: {{ 'Success' if helm_update.rc == 0 else 'Failed' }}
+          
+          Available repositories:
+          {{ helm_repo_list.stdout }}
+          
+          ===== HELM REPOSITORY SETUP COMPLETE =====
+          
+          Common Helm repositories are now configured and ready for use:
+          - stable: General stable charts
+          - bitnami: Bitnami application charts
+          - jetstack: cert-manager and related tools
+          - metallb: Load balancer for bare metal
+          - ingress-nginx: NGINX ingress controller
+          - prometheus-community: Monitoring and observability
+          
+          Use 'helm search repo <repo-name>' to find available charts.

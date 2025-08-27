@@ -1,0 +1,194 @@
+---
+- name: Install cluster management tools and configure kubeconfig on RKE2 servers
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+  vars:
+    admin_user: "{{ cluster_admin_user | default('adm4n') }}"
+
+  tasks:
+    # ===== INSTALL CLUSTER MANAGEMENT TOOLS =====
+    
+    - name: Install bc calculator
+      ansible.builtin.package:
+        name: bc
+        state: present
+
+    - name: Create tools installation directory
+      ansible.builtin.file:
+        path: /usr/local/bin
+        state: directory
+        mode: '0755'
+
+    - name: Download and install stern (Kubernetes log viewer)
+      ansible.builtin.get_url:
+        url: "https://github.com/stern/stern/releases/download/v1.30.0/stern_1.30.0_linux_amd64.tar.gz"
+        dest: /tmp/stern.tar.gz
+        mode: '0644'
+      register: stern_download
+
+    - name: Extract and install stern
+      ansible.builtin.unarchive:
+        src: /tmp/stern.tar.gz
+        dest: /tmp
+        remote_src: true
+        creates: /tmp/stern
+      when: stern_download.changed
+
+    - name: Move stern to /usr/local/bin
+      ansible.builtin.copy:
+        src: /tmp/stern
+        dest: /usr/local/bin/stern
+        mode: '0755'
+        remote_src: true
+      when: stern_download.changed
+
+    - name: Download and install helmfile
+      ansible.builtin.get_url:
+        url: "https://github.com/helmfile/helmfile/releases/download/v0.169.1/helmfile_0.169.1_linux_amd64.tar.gz"
+        dest: /tmp/helmfile.tar.gz
+        mode: '0644'
+      register: helmfile_download
+
+    - name: Extract and install helmfile
+      ansible.builtin.unarchive:
+        src: /tmp/helmfile.tar.gz
+        dest: /tmp
+        remote_src: true
+        creates: /tmp/helmfile
+      when: helmfile_download.changed
+
+    - name: Move helmfile to /usr/local/bin
+      ansible.builtin.copy:
+        src: /tmp/helmfile
+        dest: /usr/local/bin/helmfile
+        mode: '0755'
+        remote_src: true
+      when: helmfile_download.changed
+
+    - name: Clean up temporary files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/stern.tar.gz
+        - /tmp/stern
+        - /tmp/helmfile.tar.gz
+        - /tmp/helmfile
+
+    # ===== CONFIGURE KUBECONFIG FOR CLUSTER ADMIN USER =====
+
+    - name: Ensure .kube directory exists for cluster admin user
+      ansible.builtin.file:
+        path: "/home/{{ admin_user }}/.kube"
+        state: directory
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: '0755'
+      become_user: "{{ admin_user }}"
+
+    - name: Copy kubeconfig to cluster admin user's .kube directory
+      ansible.builtin.copy:
+        src: /etc/rancher/rke2/rke2.yaml
+        dest: "/home/{{ admin_user }}/.kube/config"
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: '0600'
+        remote_src: true
+
+    - name: Add KUBECONFIG export to cluster admin user's shell profiles
+      ansible.builtin.lineinfile:
+        path: "/home/{{ admin_user }}/{{ item }}"
+        line: "export KUBECONFIG=$HOME/.kube/config"
+        create: true
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: '0644'
+      loop:
+        - .bashrc
+        - .profile
+        - .bash_profile
+      become_user: "{{ admin_user }}"
+
+    # ===== CONFIGURE KUBECONFIG FOR ROOT USER =====
+
+    - name: Ensure .kube directory exists for root user
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy kubeconfig to root's .kube directory
+      ansible.builtin.copy:
+        src: /etc/rancher/rke2/rke2.yaml
+        dest: /root/.kube/config
+        owner: root
+        group: root
+        mode: '0600'
+        remote_src: true
+
+    - name: Add KUBECONFIG export to root's shell profiles
+      ansible.builtin.lineinfile:
+        path: "/root/{{ item }}"
+        line: "export KUBECONFIG=/root/.kube/config"
+        create: true
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - .bashrc
+        - .profile
+
+    # ===== VERIFICATION =====
+
+    - name: Verify kubectl access for cluster admin user
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl get nodes --no-headers | wc -l
+      become_user: "{{ admin_user }}"
+      register: user_kubectl_test
+      changed_when: false
+
+    - name: Verify kubectl access for root user
+      ansible.builtin.shell: |
+        export KUBECONFIG=/root/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl get nodes --no-headers | wc -l
+      register: root_kubectl_test
+      changed_when: false
+
+    - name: Test installed tools
+      ansible.builtin.shell: |
+        echo "Testing bc: 2+2="
+        echo "2+2" | bc
+        echo "Testing stern version:"
+        stern --version 2>/dev/null || echo "stern installation needs verification"
+        echo "Testing helmfile version:"
+        helmfile --version 2>/dev/null || echo "helmfile installation needs verification"
+      register: tools_test
+      changed_when: false
+
+    - name: Display verification results
+      ansible.builtin.debug:
+        msg: |
+          ===== VERIFICATION RESULTS =====
+          
+          Kubectl access for {{ admin_user }}: {{ user_kubectl_test.stdout | trim }} nodes accessible
+          Kubectl access for root: {{ root_kubectl_test.stdout | trim }} nodes accessible
+          
+          Tools test output:
+          {{ tools_test.stdout }}
+          
+          ===== CONFIGURATION COMPLETE =====
+          
+          KUBECONFIG is now permanently configured for both users:
+          - {{ admin_user }}: ~/.kube/config
+          - root: /root/.kube/config
+          
+          Tools installed:
+          - bc calculator
+          - stern (Kubernetes log viewer)
+          - helmfile (Helm environment management)
+          
+          All tools are available in /usr/local/bin/

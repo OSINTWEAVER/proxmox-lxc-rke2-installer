@@ -1,0 +1,179 @@
+---
+- name: Test NVIDIA Runtime with GPU Benchmark on All GPU Nodes
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+  vars:
+    admin_user: "{{ cluster_admin_user | default('adm4n') }}"
+    
+  tasks:
+    - name: Check if Kubernetes is ready
+      command: kubectl get nodes
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      register: nodes_check
+      
+    - name: Get GPU nodes list
+      command: kubectl get nodes -l node-type=gpu-worker --no-headers -o custom-columns=NAME:.metadata.name
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      register: gpu_nodes_list
+      
+    - name: Display GPU nodes found
+      debug:
+        msg: |
+          Found GPU nodes:
+          {{ gpu_nodes_list.stdout_lines }}
+          
+    - name: Clean up any existing test pods
+      command: kubectl delete pod -l app=nvidia-runtime-test --ignore-not-found=true
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+        
+    - name: Wait for cleanup
+      pause:
+        seconds: 5
+        
+    - name: Create GPU test pods on each GPU node
+      shell: |
+        NODE_NAME="{{ item }}"
+        POD_NAME="nbody-gpu-test-${NODE_NAME##*-}"
+        
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: ${POD_NAME}
+          namespace: default
+          labels:
+            app: nvidia-runtime-test
+            test-node: "${NODE_NAME}"
+        spec:
+          restartPolicy: OnFailure
+          runtimeClassName: nvidia
+          nodeSelector:
+            kubernetes.io/hostname: "${NODE_NAME}"
+          containers:
+          - name: cuda-container
+            image: nvcr.io/nvidia/k8s/cuda-sample:nbody
+            args: ["nbody", "-gpu", "-benchmark"]
+            env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+        EOF
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      loop: "{{ gpu_nodes_list.stdout_lines }}"
+      when: gpu_nodes_list.stdout_lines | length > 0
+      
+    - name: Wait for pods to start
+      pause:
+        seconds: 10
+        
+    - name: Monitor test pods status
+      command: kubectl get pods -l app=nvidia-runtime-test -o wide
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      register: test_pods_status
+      
+    - name: Display test pods status
+      debug:
+        msg: |
+          GPU Test Pods Status:
+          {{ test_pods_status.stdout }}
+          
+    - name: Wait for test pods to complete (max 5 minutes)
+      shell: |
+        echo "Waiting for GPU test pods to complete..."
+        for i in {1..60}; do
+          # Check if all pods are either Succeeded or Failed
+          running_pods=$(kubectl get pods -l app=nvidia-runtime-test --no-headers | grep -v -E "(Succeeded|Failed|Error)" | wc -l)
+          if [ "$running_pods" -eq 0 ]; then
+            echo "✅ All test pods completed"
+            break
+          fi
+          echo "Waiting for $running_pods pods to complete... (attempt $i/60)"
+          sleep 5
+        done
+        
+        echo "Final pod status:"
+        kubectl get pods -l app=nvidia-runtime-test -o wide
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      register: completion_wait
+      
+    - name: Get final test results
+      command: kubectl get pods -l app=nvidia-runtime-test -o wide
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      register: final_pod_status
+      
+    - name: Get logs from each test pod
+      shell: |
+        echo "=== GPU Test Results ==="
+        for pod in $(kubectl get pods -l app=nvidia-runtime-test --no-headers -o custom-columns=NAME:.metadata.name); do
+          echo
+          echo "📊 Results for pod: $pod"
+          echo "Node: $(kubectl get pod $pod -o jsonpath='{.spec.nodeName}')"
+          echo "Status: $(kubectl get pod $pod -o jsonpath='{.status.phase}')"
+          echo
+          echo "📋 Pod Logs:"
+          kubectl logs $pod || echo "❌ Failed to get logs"
+          echo "----------------------------------------"
+        done
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      register: all_test_logs
+      
+    - name: Display all test results
+      debug:
+        msg: "{{ all_test_logs.stdout }}"
+        
+    - name: Check for successful GPU tests
+      shell: |
+        success_count=0
+        total_count=0
+        
+        for pod in $(kubectl get pods -l app=nvidia-runtime-test --no-headers -o custom-columns=NAME:.metadata.name); do
+          total_count=$((total_count + 1))
+          status=$(kubectl get pod $pod -o jsonpath='{.status.phase}')
+          if [ "$status" = "Succeeded" ]; then
+            success_count=$((success_count + 1))
+          fi
+        done
+        
+        echo "=== GPU RUNTIME TEST SUMMARY ==="
+        echo "✅ Successful tests: $success_count/$total_count"
+        
+        if [ "$success_count" -eq "$total_count" ] && [ "$total_count" -gt 0 ]; then
+          echo "🎉 ALL GPU NODES PASSED THE RUNTIME TEST!"
+          echo "✅ NVIDIA runtime is working correctly on all GPU nodes"
+        elif [ "$success_count" -gt 0 ]; then
+          echo "⚠️ PARTIAL SUCCESS: $success_count out of $total_count nodes working"
+        else
+          echo "❌ ALL TESTS FAILED: NVIDIA runtime not working properly"
+        fi
+        
+        exit 0
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      register: test_summary
+      
+    - name: Display final summary
+      debug:
+        msg: "{{ test_summary.stdout }}"
+        
+    - name: Ask about cleanup
+      pause:
+        prompt: "Test completed. Press ENTER to clean up test pods, or Ctrl+C to keep them for debugging"
+        
+    - name: Clean up test pods
+      command: kubectl delete pod -l app=nvidia-runtime-test --ignore-not-found=true
+      environment:
+        KUBECONFIG: "/etc/rancher/rke2/rke2.yaml"
+      
+    - name: Cleanup confirmation
+      debug:
+        msg: "✅ Test pods cleaned up. GPU runtime testing complete!"
