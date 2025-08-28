@@ -5,6 +5,9 @@ contexts/
 kubeconfs/
 .DS_Store
 
+# Kubeconfig storage (semi-permanent)
+kubeconfig/
+
 # Inventory files (except templates and examples)
 hosts.ini
 
@@ -20,6 +23,9 @@ hosts.ini
 *.orig
 push-to-github.sh
 *.pem
+
+# Convenience scripts (optional)
+# scripts/fetch_kubeconfig.bat
 
 
 hosts-iris.ini

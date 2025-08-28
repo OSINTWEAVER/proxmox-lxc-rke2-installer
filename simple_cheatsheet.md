@@ -54,7 +54,7 @@ ansible-playbook -i inventories/hosts-iris.ini playbooks/playbook.yml
 ansible-playbook -i inventories/hosts-iris.ini playbooks/post_playbook_tools.yml
 ansible-playbook -i inventories/hosts-iris.ini playbooks/post_playbook_helm_repos.yml
 ansible-playbook -i inventories/hosts-iris.ini playbooks/post_playbook_ingress_migration.yml
-ansible-playbook -i inventories/hosts-iris.ini playbooks/post_playbook_storage_config.yml
+ansible-playbook -i inventories/hosts-iris.ini playbooks/post_playbook_simple_storage_test.yml
 
 # Octostar
 wsl bash -c "ssh adm4n@10.14.100.100"
@@ -64,8 +64,18 @@ ansible-playbook -i inventories/hosts-octostar.ini playbooks/playbook.yml
 ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_tools.yml
 ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_helm_repos.yml
 ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_ingress_migration.yml
-ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_storage_config.yml
+ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_simple_storage_test.yml
 
+```
+
+**Fetch Kubeconfig (Windows/WSL)**
+
+```powershell
+# Iris
+.\scripts\fetch_kubeconfig.bat inventories\hosts-iris.ini
+
+# Octostar
+.\scripts\fetch_kubeconfig.bat inventories\hosts-octostar.ini
 ```
 
 **Destroy LXC Containers for RKE2 (WSL Ansible via Powershell)**
