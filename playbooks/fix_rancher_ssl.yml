@@ -1,0 +1,66 @@
+---
+- name: Fix Rancher SSL certificate - remove passthrough
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+  vars:
+    admin_user: "{{ cluster_admin_user | default('adm4n') }}"
+    public_domain: "{{ domain | default('shxi.click') }}"
+    rancher_subdomain: "rancher.{{ public_domain }}"
+
+  tasks:
+    - name: Update Rancher ingress to use Let's Encrypt certificate
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "Updating Rancher ingress to terminate SSL at ingress level..."
+        
+        cat <<EOF | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: rancher
+          namespace: cattle-system
+          annotations:
+            cert-manager.io/cluster-issuer: "letsencrypt-prod"
+            nginx.ingress.kubernetes.io/ssl-redirect: "true"
+            nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+            nginx.ingress.kubernetes.io/proxy-ssl-verify: "false"
+        spec:
+          ingressClassName: nginx
+          tls:
+          - hosts:
+            - {{ rancher_subdomain }}
+            secretName: tls-rancher-ingress
+          rules:
+          - host: {{ rancher_subdomain }}
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: rancher
+                    port:
+                      number: 443
+        EOF
+        
+        echo "Rancher ingress updated successfully"
+      become_user: "{{ admin_user }}"
+
+    - name: Check ingress status
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        echo "Ingress status:"
+        /var/lib/rancher/rke2/bin/kubectl get ingress rancher -n cattle-system -o wide
+        echo
+        echo "Certificate status:"
+        /var/lib/rancher/rke2/bin/kubectl get certificate rancher-ssl -n cattle-system
+        echo
+        echo "SSL should now work at: https://{{ rancher_subdomain }}"
+      become_user: "{{ admin_user }}"
+      register: status_check
+
+    - name: Display results
+      ansible.builtin.debug:
+        var: status_check.stdout_lines
