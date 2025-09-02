@@ -165,11 +165,11 @@
         path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
         marker: "# {mark} LXC_K8S_SETTINGS"
         block: |
-          features: nesting=1,fuse=1,keyctl=1,mknod=1,mount=cifs;nfs
+          features: mount=cifs;nfs
+          lxc.apparmor.profile = unconfined
           lxc.cgroup2.devices.allow: a
           lxc.cgroup2.devices.allow: b
-          lxc.cgroup2.devices.allow: c
-          lxc.cap.drop =
+          lxc.cgroup2.devices.allow: c 
           lxc.mount.auto: proc:rw sys:rw cgroup:rw
           lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
           lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
@@ -444,7 +444,7 @@
         executable: /bin/bash
       loop: "{{ proxmox_cluster.containers }}"
 
-    - name: Create optimal Docker daemon configuration for LXC
+    - name: Create optimal Docker daemon configuration for LXC with AppArmor support
       when: item.host == inventory_hostname and (item.docker | default(false))
       ansible.builtin.shell: |
         pct exec {{ item.id }} -- bash -c 'cat > /etc/docker/daemon.json << "EOF"
@@ -459,10 +459,12 @@
           "live-restore": false,
           "userland-proxy": false,
           "iptables": false,
-          "bridge": "none"
+          "bridge": "none",
+          "apparmor-profile": "",
+          "security-opts": ["apparmor:unconfined"]
         }
         EOF'
-        echo "Docker daemon configuration created in container {{ item.id }}"
+        echo "Docker daemon configuration with AppArmor support created in container {{ item.id }}"
       args:
         executable: /bin/bash
       loop: "{{ proxmox_cluster.containers }}"

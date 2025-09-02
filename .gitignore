@@ -44,3 +44,6 @@ hosts-octostar_actual.ini
 lxc_map_iris_development.yml
 simple_cheatsheet_actual.md
 install_rancher_only.yml
+
+# Emergency fix playbooks (temporary)
+playbooks/emergency-fix-containers.yml

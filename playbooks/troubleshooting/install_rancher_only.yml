@@ -6,8 +6,8 @@
   vars:
     admin_user: "{{ cluster_admin_user | default('adm4n') }}"
     rke2_data_path: "/var/lib/rancher/rke2"
-    rancher_hostname: "rancher.octostar.darkwinds.internal"
-    rancher_bootstrap_password: ""
+    rancher_hostname: "{{ rancher_hostname | default('rancher.local') }}"
+    rancher_bootstrap_password: "{{ rancher_bootstrap_password | default('') }}"
 
   tasks:
     - name: Wait for any lingering namespace cleanup
