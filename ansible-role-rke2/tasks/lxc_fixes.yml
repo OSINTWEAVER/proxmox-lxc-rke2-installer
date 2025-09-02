@@ -605,6 +605,23 @@
 # Install NVIDIA Container Toolkit for LXC environments
 # GPU Operator has limitations in LXC, so we install toolkit directly
 # Only run on nodes explicitly marked as GPU nodes
+
+- name: Check if NVIDIA Container Toolkit is already installed
+  ansible.builtin.shell: |
+    if command -v nvidia-container-runtime >/dev/null 2>&1 && \
+       dpkg -l | grep -q nvidia-container-toolkit; then
+      echo "ALREADY_INSTALLED"
+      nvidia-container-runtime --version 2>/dev/null || echo "Version check failed"
+    else
+      echo "NOT_INSTALLED"
+    fi
+  register: nvidia_toolkit_check
+  changed_when: false
+  when: >
+    (inventory_hostname in groups.get('gpu_nodes', [])) or 
+    (is_gpu_node | default(false)) or
+    (ansible_hostname | regex_search(gpu_node_pattern | default('gpu')))
+
 - name: Install NVIDIA Container Toolkit for GPU nodes
   ansible.builtin.shell: |
     echo "INSTALLING NVIDIA CONTAINER TOOLKIT FOR LXC"
@@ -631,6 +648,23 @@
   register: nvidia_toolkit_install
   changed_when: "'SUCCESS' in nvidia_toolkit_install.stdout"
   when: >
+    ((inventory_hostname in groups.get('gpu_nodes', [])) or 
+     (is_gpu_node | default(false)) or
+     (ansible_hostname | regex_search(gpu_node_pattern | default('gpu')))) and
+    (nvidia_toolkit_check.stdout | default('') != 'ALREADY_INSTALLED')
+
+- name: Display NVIDIA Container Toolkit status
+  ansible.builtin.debug:
+    msg: |
+      NVIDIA Container Toolkit Status: 
+      {% if nvidia_toolkit_check is defined and nvidia_toolkit_check.stdout == 'ALREADY_INSTALLED' %}
+      ✓ Already installed - skipping installation
+      {% elif nvidia_toolkit_install is defined %}
+      ✓ Successfully installed
+      {% else %}
+      ⚠ Not applicable (not a GPU node)
+      {% endif %}
+  when: >
     (inventory_hostname in groups.get('gpu_nodes', [])) or 
     (is_gpu_node | default(false)) or
     (ansible_hostname | regex_search(gpu_node_pattern | default('gpu')))
@@ -642,7 +676,7 @@
 - name: Display NVIDIA Container Toolkit installation results
   ansible.builtin.debug:
     var: nvidia_toolkit_install.stdout_lines
-  when: nvidia_toolkit_install is defined
+  when: nvidia_toolkit_install is defined and nvidia_toolkit_install.stdout is defined
 
 # Advanced LXC mount optimizations for Kubernetes workloads
 - name: Configure advanced mount optimizations for LXC
@@ -884,7 +918,7 @@
       - Network Stack: Bridge netfilter, IP forwarding, conntrack optimization
       - Sysctl Tuning: Container-optimized kernel parameters
       - Device Access: /dev/kmsg created for kubelet compatibility
-      - NVIDIA Container Toolkit: {{ 'Installed directly for LXC compatibility' if has_nvidia_devices | default(false) else 'Skipped (no GPU detected)' }}
+      - NVIDIA Container Toolkit: {% if nvidia_toolkit_check is defined and nvidia_toolkit_check.stdout == 'ALREADY_INSTALLED' %}Already installed (skipped){% elif nvidia_toolkit_install is defined %}Installed directly for LXC compatibility{% elif has_nvidia_devices | default(false) %}Required but installation failed{% else %}Skipped (no GPU detected){% endif %}
       
       PERFORMANCE OPTIMIZATIONS:
       - Resource Limits: System and Kube reserved resources configured
