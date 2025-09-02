@@ -922,7 +922,7 @@
       - Network Stack: Bridge netfilter, IP forwarding, conntrack optimization
       - Sysctl Tuning: Container-optimized kernel parameters
       - Device Access: /dev/kmsg created for kubelet compatibility
-      - NVIDIA Container Toolkit: {% if nvidia_toolkit_check is defined and nvidia_toolkit_check.stdout == 'ALREADY_INSTALLED' %}Already installed (skipped){% elif nvidia_toolkit_install is defined %}Installed directly for LXC compatibility{% elif has_nvidia_devices | default(false) %}Required but installation failed{% else %}Skipped (no GPU detected){% endif %}
+      - NVIDIA Container Toolkit: {% if nvidia_toolkit_check is defined and nvidia_toolkit_check.stdout | default('') == 'ALREADY_INSTALLED' %}Already installed (skipped){% elif nvidia_toolkit_install is defined and nvidia_toolkit_install.stdout_lines is defined %}Installed directly for LXC compatibility{% elif has_nvidia_devices | default(false) %}Required but installation failed{% else %}Skipped (no GPU detected){% endif %}
       
       PERFORMANCE OPTIMIZATIONS:
       - Resource Limits: System and Kube reserved resources configured
