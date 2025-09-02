@@ -93,6 +93,16 @@
   args:
     executable: /bin/bash
 
+- name: Check if Rancher is already installed
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    /usr/local/bin/helm list -n cattle-system | grep -q "^rancher\s"
+  args:
+    executable: /bin/bash
+  register: rancher_check
+  failed_when: false
+  changed_when: false
+
 - name: Install Rancher following official documentation (compatible with current K8s version)
   ansible.builtin.shell: |
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
@@ -114,6 +124,78 @@
   args:
     executable: /bin/bash
   register: rancher_install_result
+  retries: 5
+  delay: 30
+  until: rancher_install_result.rc == 0
+  when: rancher_check.rc != 0
+
+- name: Show Rancher installation failure details (if failed)
+  ansible.builtin.debug:
+    msg: |
+      Rancher installation failed after 5 retries!
+      Error: {{ rancher_install_result.stderr | default('No error message') }}
+      Command output: {{ rancher_install_result.stdout | default('No output') }}
+      
+      Troubleshooting steps:
+      1. Check if namespace exists: kubectl get namespace cattle-system
+      2. Check existing releases: helm list -n cattle-system
+      3. Check pod status: kubectl get pods -n cattle-system
+      4. Remove failed release: helm uninstall rancher -n cattle-system
+  when: rancher_check.rc != 0 and rancher_install_result.failed | default(false)
+
+- name: Upgrade Rancher if already installed with different configuration
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    /usr/local/bin/helm upgrade rancher rancher-stable/rancher \
+      --namespace cattle-system \
+      --set hostname="{{ rancher_hostname }}" \
+      --set bootstrapPassword="{{ rancher_bootstrap_password }}" \
+      --set replicas=1 \
+      --set ingress.tls.source=rancher \
+      --set resources.requests.cpu=250m \
+      --set resources.requests.memory=512Mi \
+      --set resources.limits.cpu=500m \
+      --set resources.limits.memory=1Gi \
+      --set extraEnv[0].name=CATTLE_SYSTEM_DEFAULT_REGISTRY \
+      --set extraEnv[0].value="" \
+      --set useBundledSystemChart=true \
+      --timeout=600s \
+      --wait
+  args:
+    executable: /bin/bash
+  register: rancher_upgrade_result
+  retries: 3
+  delay: 30
+  until: rancher_upgrade_result.rc == 0
+  when: rancher_check.rc == 0
+
+- name: Show Rancher upgrade failure details (if failed)
+  ansible.builtin.debug:
+    msg: |
+      Rancher upgrade failed after 3 retries!
+      Error: {{ rancher_upgrade_result.stderr | default('No error message') }}
+      Command output: {{ rancher_upgrade_result.stdout | default('No output') }}
+      
+      Troubleshooting steps:
+      1. Check current release: helm get values rancher -n cattle-system
+      2. Check pod status: kubectl get pods -n cattle-system
+      3. Force upgrade: helm upgrade rancher rancher-stable/rancher -n cattle-system --force
+      4. Or uninstall and reinstall: helm uninstall rancher -n cattle-system
+  when: rancher_check.rc == 0 and rancher_upgrade_result.failed | default(false)
+
+- name: Display Rancher installation status
+  ansible.builtin.debug:
+    msg: |
+      Rancher Status:
+      {% if rancher_check.rc != 0 %}
+      - Action: Fresh installation completed
+      - Status: {{ 'Success' if rancher_install_result.rc == 0 else 'Failed' }}
+      {% else %}
+      - Action: Existing installation upgraded
+      - Status: {{ 'Success' if rancher_upgrade_result.rc == 0 else 'Failed' }}
+      {% endif %}
+      - Hostname: {{ rancher_hostname }}
+      - Namespace: cattle-system
 
 - name: Wait for Rancher deployment to be ready
   ansible.builtin.shell: |

@@ -1,0 +1,123 @@
+---
+- name: Fix networking issues caused by RDMA setup
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Remove RDMA rxe0 link that's interfering with networking
+      ansible.builtin.shell: |
+        # Remove the rxe0 RDMA link that might be interfering
+        rdma link delete rxe0 || echo "rxe0 link not found or already removed"
+        echo "RDMA rxe0 link removal attempted"
+      args:
+        executable: /bin/bash
+      register: rdma_removal_result
+      failed_when: false
+
+    - name: Display RDMA removal results
+      ansible.builtin.debug:
+        msg: "{{ rdma_removal_result.stdout }}"
+
+    - name: Check current network interfaces
+      ansible.builtin.shell: |
+        echo "=== Current Network Interfaces ==="
+        ip link show
+        echo "=== RDMA Links ==="
+        rdma link show || echo "No RDMA links found"
+        echo "=== Bond0 Status ==="
+        cat /proc/net/bonding/bond0 || echo "Bond0 not found"
+      args:
+        executable: /bin/bash
+      register: network_status
+      failed_when: false
+
+    - name: Display current network status
+      ansible.builtin.debug:
+        msg: "{{ network_status.stdout }}"
+
+    - name: Restart networking services to clear any RDMA interference
+      ansible.builtin.shell: |
+        # Restart networking to clear any RDMA interference
+        systemctl restart networking || true
+        systemctl restart systemd-networkd || true
+        # Bring bond0 down and up to reset it
+        ip link set bond0 down || true
+        sleep 2
+        ip link set bond0 up || true
+        echo "Network services restarted"
+      args:
+        executable: /bin/bash
+      register: network_restart_result
+
+    - name: Display network restart results
+      ansible.builtin.debug:
+        msg: "{{ network_restart_result.stdout }}"
+
+    - name: Wait for network to stabilize
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Test connectivity between nodes
+      ansible.builtin.shell: |
+        echo "=== Testing Network Connectivity ==="
+        echo "--- Ping test to other known hosts ---"
+        # You might need to adjust these IPs based on your setup
+        ping -c 3 8.8.8.8 || echo "Internet connectivity failed"
+        echo "--- Network interface status ---"
+        ip addr show bond0 || echo "Bond0 interface check failed"
+        echo "--- Routing table ---"
+        ip route show
+      args:
+        executable: /bin/bash
+      register: connectivity_test
+      failed_when: false
+
+    - name: Display connectivity test results
+      ansible.builtin.debug:
+        msg: "{{ connectivity_test.stdout }}"
+
+    - name: Remove problematic RDMA modules temporarily
+      ansible.builtin.shell: |
+        echo "Removing RDMA modules that might interfere with networking"
+        rmmod rdma_rxe || echo "rdma_rxe module not loaded"
+        rmmod ib_uverbs || echo "ib_uverbs module not loaded"  
+        rmmod rdma_cm || echo "rdma_cm module not loaded"
+        echo "RDMA modules removal attempted"
+      args:
+        executable: /bin/bash
+      register: module_removal_result
+      failed_when: false
+
+    - name: Display module removal results
+      ansible.builtin.debug:
+        msg: "{{ module_removal_result.stdout }}"
+
+    - name: Final network status check
+      ansible.builtin.shell: |
+        echo "=== Final Network Status Check ==="
+        ip link show | grep -E "(bond0|UP|DOWN)"
+        echo "--- Active connections ---"
+        ss -tuln | head -10
+      args:
+        executable: /bin/bash
+      register: final_status
+      failed_when: false
+
+    - name: Display final status
+      ansible.builtin.debug:
+        msg: "{{ final_status.stdout }}"
+
+    - name: Network recovery summary
+      ansible.builtin.debug:
+        msg: |
+          Network recovery actions completed for {{ inventory_hostname }}:
+          1. Removed RDMA rxe0 link
+          2. Restarted networking services
+          3. Temporarily removed RDMA modules
+          4. Checked connectivity
+          
+          If networking is still broken, you may need to:
+          - Reboot the Proxmox host
+          - Check /etc/network/interfaces configuration
+          - Manually reconfigure bond0 interface

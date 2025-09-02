@@ -55,10 +55,25 @@
 
     - name: Prepare directory when type=directory
       when: mount.type == 'directory'
-      ansible.builtin.file:
-        path: "{{ mount.host_path }}"
-        state: directory
-        mode: '0755'
+      block:
+        - name: Check if path is a mount point
+          ansible.builtin.shell: mountpoint -q "{{ mount.host_path }}"
+          register: is_mountpoint
+          failed_when: false
+          changed_when: false
+
+        - name: Create directory (not on mount point)
+          ansible.builtin.file:
+            path: "{{ mount.host_path }}"
+            state: directory
+            mode: '0755'
+          when: is_mountpoint.rc != 0
+
+        - name: Ensure mount point directory exists (skip permission setting)
+          ansible.builtin.file:
+            path: "{{ mount.host_path }}"
+            state: directory
+          when: is_mountpoint.rc == 0
 
     - name: Stub for LVM LV creation (not implemented)
       when: mount.type == 'lvm_lv'

@@ -7,6 +7,7 @@ proxmox_cluster:
   bridge: vmbr0
   vlan_tag: 14
   gateway: 10.14.1.1
+  mtu: 1500  # Default MTU, change to 9000 for jumbo frames
 
   storage_defaults:
     zfs_pool: temp-pool         # default pool for zfs_volume mounts
@@ -19,6 +20,7 @@ proxmox_cluster:
   nvidia:
     driver_host_path: ""        # e.g., /root/NVIDIA-Linux-x86_64-575.64.05.run on the Proxmox host
     driver_dest_path: "/root"   # where to copy in the container
+    driver_version: "575.64.05" # NVIDIA driver version number
 
   containers:
     - id: 101
@@ -34,6 +36,7 @@ proxmox_cluster:
           size: 50G
           container_path: /mnt/data
       gpu: false
+      docker: false  # Install Docker CE for container management tasks
 
     - id: 102
       host: 10.0.10.1
@@ -48,6 +51,7 @@ proxmox_cluster:
           size: 3T
           container_path: /mnt/data
       gpu: true
+      docker: true  # Control plane typically needs Docker for management
       # nvidia_driver_host_path: /root/NVIDIA-Linux-x86_64-575.64.05.run
 
     - id: 103
@@ -63,4 +67,5 @@ proxmox_cluster:
           size: 3T
           container_path: /mnt/data
       gpu: true
+      docker: false  # Worker nodes typically don't need Docker
       # nvidia_driver_host_path: /root/NVIDIA-Linux-x86_64-575.64.05.run

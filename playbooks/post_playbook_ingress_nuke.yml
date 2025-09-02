@@ -1,0 +1,271 @@
+---
+- name: Nuclear option - Complete ingress removal and cleanup
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+  vars:
+    admin_user: "{{ cluster_admin_user | default('adm4n') }}"
+
+  tasks:
+    # ===== NUCLEAR INGRESS DESTRUCTION SEQUENCE =====
+    
+    - name: Display nuclear warning
+      ansible.builtin.debug:
+        msg: |
+          ⚠️  ===== NUCLEAR INGRESS DESTRUCTION INITIATED =====
+          
+          This playbook will COMPLETELY REMOVE all ingress components:
+          - All ingress controllers (RKE2, upstream, third-party)
+          - All ingress resources and configurations
+          - All admission webhooks
+          - All ingress classes
+          - All ingress-related namespaces
+          
+          Use this when you want a completely clean slate for custom ingress installations.
+          
+          🚨 THIS IS DESTRUCTIVE AND CANNOT BE UNDONE! 🚨
+          
+          ===== DESTRUCTION COMMENCING IN 5 SECONDS =====
+
+    - name: Nuclear countdown pause
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Phase 1 - Destroy all ingress resources and controllers
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔥 PHASE 1: DESTROYING ALL INGRESS RESOURCES"
+        echo "=============================================="
+        
+        # Remove ALL ingresses from ALL namespaces (no mercy)
+        echo "💥 Removing all ingress resources..."
+        /var/lib/rancher/rke2/bin/kubectl delete ingress --all --all-namespaces --ignore-not-found=true --force --grace-period=0
+        
+        # Destroy ALL admission webhooks (they prevent clean removal)
+        echo "💥 Destroying admission webhooks..."
+        /var/lib/rancher/rke2/bin/kubectl delete validatingwebhookconfiguration --all --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete mutatingwebhookconfiguration --all --ignore-not-found=true --force --grace-period=0
+        
+        # Nuclear strike on ALL ingress classes
+        echo "💥 Nuking all ingress classes..."
+        /var/lib/rancher/rke2/bin/kubectl delete ingressclass --all --ignore-not-found=true --force --grace-period=0
+        
+        echo "✅ Phase 1 complete - All ingress resources destroyed"
+      become_user: "{{ admin_user }}"
+      register: phase1_destruction
+
+    - name: Phase 2 - Annihilate RKE2 embedded ingress components
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔥 PHASE 2: ANNIHILATING RKE2 EMBEDDED INGRESS"
+        echo "=============================================="
+        
+        # Destroy RKE2 DaemonSets (the most persistent ones)
+        echo "💥 Destroying RKE2 ingress DaemonSets..."
+        /var/lib/rancher/rke2/bin/kubectl delete daemonset -n kube-system -l app.kubernetes.io/name=rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete daemonset -n kube-system rke2-ingress-nginx-controller --ignore-not-found=true --force --grace-period=0
+        
+        # Destroy RKE2 deployments
+        echo "💥 Destroying RKE2 ingress deployments..."
+        /var/lib/rancher/rke2/bin/kubectl delete deployment -n kube-system -l app.kubernetes.io/name=rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete deployment -n kube-system rke2-ingress-nginx-controller --ignore-not-found=true --force --grace-period=0
+        
+        # Destroy RKE2 services
+        echo "💥 Destroying RKE2 ingress services..."
+        /var/lib/rancher/rke2/bin/kubectl delete service -n kube-system -l app.kubernetes.io/name=rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete service -n kube-system rke2-ingress-nginx-controller --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete service -n kube-system rke2-ingress-nginx-controller-admission --ignore-not-found=true --force --grace-period=0
+        
+        # Destroy RKE2 configmaps
+        echo "💥 Destroying RKE2 ingress ConfigMaps..."
+        /var/lib/rancher/rke2/bin/kubectl delete configmap -n kube-system -l app.kubernetes.io/name=rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete configmap -n kube-system rke2-ingress-nginx-controller --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete configmap -n kube-system chart-content-rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        
+        # Destroy service accounts
+        echo "💥 Destroying RKE2 ingress ServiceAccounts..."
+        /var/lib/rancher/rke2/bin/kubectl delete serviceaccount -n kube-system -l app.kubernetes.io/name=rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete serviceaccount -n kube-system rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        
+        echo "✅ Phase 2 complete - RKE2 ingress components annihilated"
+      become_user: "{{ admin_user }}"
+      register: phase2_destruction
+
+    - name: Phase 3 - Obliterate cluster-wide ingress permissions
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔥 PHASE 3: OBLITERATING CLUSTER-WIDE PERMISSIONS"
+        echo "=============================================="
+        
+        # Destroy ALL ingress-related ClusterRoles
+        echo "💥 Destroying ingress ClusterRoles..."
+        /var/lib/rancher/rke2/bin/kubectl delete clusterrole -l app.kubernetes.io/name=ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete clusterrole rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete clusterrole ingress-nginx --ignore-not-found=true --force --grace-period=0
+        
+        # Destroy ALL ingress-related ClusterRoleBindings
+        echo "💥 Destroying ingress ClusterRoleBindings..."
+        /var/lib/rancher/rke2/bin/kubectl delete clusterrolebinding -l app.kubernetes.io/name=ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete clusterrolebinding rke2-ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete clusterrolebinding ingress-nginx --ignore-not-found=true --force --grace-period=0
+        
+        # Destroy ingress-related jobs
+        echo "💥 Destroying ingress jobs..."
+        /var/lib/rancher/rke2/bin/kubectl delete job -n kube-system -l app.kubernetes.io/name=ingress-nginx --ignore-not-found=true --force --grace-period=0
+        /var/lib/rancher/rke2/bin/kubectl delete job --all-namespaces -l app.kubernetes.io/component=admission-webhook --ignore-not-found=true --force --grace-period=0
+        
+        echo "✅ Phase 3 complete - Cluster-wide permissions obliterated"
+      become_user: "{{ admin_user }}"
+      register: phase3_destruction
+
+    - name: Phase 4 - Nuclear strike on ingress namespaces
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔥 PHASE 4: NUCLEAR STRIKE ON INGRESS NAMESPACES"
+        echo "=============================================="
+        
+        # List potential ingress namespaces before destruction
+        echo "🔍 Scanning for ingress namespaces to destroy..."
+        /var/lib/rancher/rke2/bin/kubectl get namespaces | grep -E "(ingress|nginx)" || echo "No obvious ingress namespaces found"
+        
+        # Force delete common ingress namespaces
+        echo "💥 Destroying ingress-nginx namespace..."
+        /var/lib/rancher/rke2/bin/kubectl delete namespace ingress-nginx --ignore-not-found=true --force --grace-period=0
+        
+        echo "💥 Destroying nginx-ingress namespace (alternative naming)..."
+        /var/lib/rancher/rke2/bin/kubectl delete namespace nginx-ingress --ignore-not-found=true --force --grace-period=0
+        
+        echo "💥 Destroying ingress-controller namespace..."
+        /var/lib/rancher/rke2/bin/kubectl delete namespace ingress-controller --ignore-not-found=true --force --grace-period=0
+        
+        echo "✅ Phase 4 complete - Ingress namespaces nuked"
+      become_user: "{{ admin_user }}"
+      register: phase4_destruction
+
+    - name: Phase 5 - Wait for nuclear fallout to settle
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔥 PHASE 5: WAITING FOR NUCLEAR FALLOUT TO SETTLE"
+        echo "=============================================="
+        
+        echo "⏳ Waiting for all ingress pods to be terminated..."
+        for i in {1..120}; do
+          pod_count=$(/var/lib/rancher/rke2/bin/kubectl get pods --all-namespaces --no-headers 2>/dev/null | grep -i "ingress\|nginx" | wc -l)
+          if [ "$pod_count" -eq 0 ]; then
+            echo "✅ All ingress pods have been terminated"
+            break
+          fi
+          echo "   💀 Still waiting for $pod_count ingress pods to die... (attempt $i/120)"
+          sleep 3
+        done
+        
+        echo "⏳ Waiting for namespaces to be completely deleted..."
+        for i in {1..60}; do
+          ns_count=$(/var/lib/rancher/rke2/bin/kubectl get namespaces --no-headers 2>/dev/null | grep -i "ingress\|nginx" | wc -l)
+          if [ "$ns_count" -eq 0 ]; then
+            echo "✅ All ingress namespaces have been deleted"
+            break
+          fi
+          echo "   💀 Still waiting for $ns_count ingress namespaces to be deleted... (attempt $i/60)"
+          sleep 2
+        done
+        
+        echo "✅ Phase 5 complete - Nuclear fallout has settled"
+      become_user: "{{ admin_user }}"
+      register: phase5_cleanup
+
+    - name: Phase 6 - Post-nuclear radiation survey
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔥 PHASE 6: POST-NUCLEAR RADIATION SURVEY"
+        echo "=============================================="
+        
+        echo "🔍 Scanning for any surviving ingress components..."
+        
+        echo ""
+        echo "📊 PODS (should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get pods --all-namespaces | grep -i "ingress\|nginx" || echo "   ✅ No ingress pods detected"
+        
+        echo ""
+        echo "📊 SERVICES (should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get services --all-namespaces | grep -i "ingress\|nginx" || echo "   ✅ No ingress services detected"
+        
+        echo ""
+        echo "📊 DAEMONSETS (should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get daemonsets --all-namespaces | grep -i "ingress\|nginx" || echo "   ✅ No ingress daemonsets detected"
+        
+        echo ""
+        echo "📊 DEPLOYMENTS (should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get deployments --all-namespaces | grep -i "ingress\|nginx" || echo "   ✅ No ingress deployments detected"
+        
+        echo ""
+        echo "📊 INGRESS CLASSES (should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get ingressclass 2>/dev/null || echo "   ✅ No ingress classes detected"
+        
+        echo ""
+        echo "📊 INGRESS RESOURCES (should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get ingress --all-namespaces 2>/dev/null || echo "   ✅ No ingress resources detected"
+        
+        echo ""
+        echo "📊 ADMISSION WEBHOOKS (should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get validatingwebhookconfiguration 2>/dev/null | grep -i "ingress\|nginx" || echo "   ✅ No ingress admission webhooks detected"
+        
+        echo ""
+        echo "📊 NAMESPACES (ingress-related should be empty):"
+        /var/lib/rancher/rke2/bin/kubectl get namespaces | grep -i "ingress\|nginx" || echo "   ✅ No ingress namespaces detected"
+        
+        echo ""
+        echo "🎯 NUCLEAR INGRESS DESTRUCTION ASSESSMENT:"
+        surviving_components=$(/var/lib/rancher/rke2/bin/kubectl get pods,services,daemonsets,deployments --all-namespaces --no-headers 2>/dev/null | grep -i "ingress\|nginx" | wc -l)
+        
+        if [ "$surviving_components" -eq 0 ]; then
+          echo "   ✅ COMPLETE SUCCESS: All ingress components have been obliterated"
+          echo "   🏗️  Cluster is ready for custom ingress installation"
+        else
+          echo "   ⚠️  WARNING: $surviving_components ingress components survived the nuclear strike"
+          echo "   🔄 You may need to manually remove stubborn resources"
+        fi
+        
+        echo ""
+        echo "✅ Phase 6 complete - Radiation survey finished"
+      become_user: "{{ admin_user }}"
+      register: final_survey
+
+    - name: Display nuclear destruction summary
+      ansible.builtin.debug:
+        msg: |
+          💥 ===== NUCLEAR INGRESS DESTRUCTION COMPLETE =====
+          
+          🎯 DESTRUCTION SUMMARY:
+          {% if final_survey.stdout is defined %}
+          {{ final_survey.stdout }}
+          {% endif %}
+          
+          🚀 NEXT STEPS:
+          - Your cluster is now completely free of ingress components
+          - You can install any custom ingress controller (Traefik, HAProxy, etc.)
+          - Or reinstall standard ingress-nginx with your preferred configuration
+          - No conflicting resources should remain
+          
+          🛡️  SAFETY NOTE:
+          - This was a destructive operation that cannot be undone
+          - All previous ingress configurations have been lost
+          - You will need to recreate any custom ingress rules
+          
+          💣 NUCLEAR OPTION COMPLETE - CLUSTER IS CLEAN! 💣
+
+  handlers:
+    - name: Emergency cleanup if needed
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        echo "🚨 Emergency cleanup triggered - removing any remaining stubborn resources"
+        /var/lib/rancher/rke2/bin/kubectl patch namespace ingress-nginx -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+        /var/lib/rancher/rke2/bin/kubectl patch namespace nginx-ingress -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+      become_user: "{{ admin_user }}"
+      failed_when: false

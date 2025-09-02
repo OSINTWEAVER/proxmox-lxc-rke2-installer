@@ -7,6 +7,7 @@ proxmox_cluster:
   bridge: vmbr0
   vlan_tag: 14
   gateway: 10.14.1.1
+  mtu: 9000
 
   storage_defaults:
     zfs_pool: temp-pool         # default pool for zfs_volume mounts
@@ -14,11 +15,12 @@ proxmox_cluster:
 
   ssh:
     username: adm4n             # container admin user to create
-    password: 3rgoD0x!         # set a strong password
+    password: password123         # set a strong password
 
   nvidia:
     driver_host_path: "/root/NVIDIA-Linux-x86_64-575.64.05.run"        # e.g., /root/NVIDIA-Linux-x86_64-575.64.05.run on the Proxmox host
     driver_dest_path: "/root"   # where to copy in the container
+    driver_version: "575.64.05" # NVIDIA driver version number
 
   containers:
     - id: 101
@@ -34,7 +36,7 @@ proxmox_cluster:
           name: vm-101-data
           size: 50G
           container_path: /mnt/data
-      gpu: false
+      gpu: true
 
     - id: 102
       host: 10.0.10.7
@@ -48,7 +50,7 @@ proxmox_cluster:
           name: vm-102-data
           size: 3T
           container_path: /mnt/data
-      gpu: false
+      gpu: true
 
     - id: 103
       host: 10.0.10.5

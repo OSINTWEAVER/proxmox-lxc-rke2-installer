@@ -27,7 +27,19 @@ push-to-github.sh
 # Convenience scripts (optional)
 # scripts/fetch_kubeconfig.bat
 
+# Private development playbooks and configs
+playbooks/update_hosts_iris_dev.yml
 
 hosts-iris.ini
 lxc_map_iris.yml
 lxc_map_iris_jumpbox.yml
+hosts-octostar_real.ini
+lxc_map_iris_dev.yml
+lxc_map_iris_dev2.yml
+lxc_map_iris_postgres.yml
+*/iris_specific/*
+lxc_map_octostar_actual.yml
+lxc_map_octostar_jumpbox_actual.yml
+hosts-octostar_actual.ini
+lxc_map_iris_development.yml
+simple_cheatsheet_actual.md

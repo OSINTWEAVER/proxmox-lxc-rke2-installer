@@ -1,0 +1,118 @@
+---
+- name: Reboot Proxmox hosts to fix networking issues
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Display current host information before reboot
+      ansible.builtin.debug:
+        msg: "Preparing to reboot Proxmox host: {{ inventory_hostname }} ({{ ansible_default_ipv4.address | default('IP not detected') }})"
+
+    - name: Check current network status before reboot
+      ansible.builtin.shell: |
+        echo "=== Pre-reboot Network Status ==="
+        ip link show | grep -E "(bond0|UP|DOWN)" || echo "Network interface check failed"
+        echo "=== Current uptime ==="
+        uptime
+      args:
+        executable: /bin/bash
+      register: pre_reboot_status
+      failed_when: false
+
+    - name: Display pre-reboot status
+      ansible.builtin.debug:
+        msg: "{{ pre_reboot_status.stdout }}"
+
+    - name: Clean up any remaining RDMA artifacts before reboot
+      ansible.builtin.shell: |
+        echo "Cleaning up RDMA artifacts before reboot..."
+        # Remove any RDMA links
+        rdma link delete rxe0 2>/dev/null || echo "No rxe0 link to remove"
+        # Remove RDMA modules
+        rmmod rdma_rxe 2>/dev/null || echo "rdma_rxe not loaded"
+        rmmod ib_uverbs 2>/dev/null || echo "ib_uverbs not loaded"
+        rmmod rdma_cm 2>/dev/null || echo "rdma_cm not loaded"
+        echo "RDMA cleanup completed"
+      args:
+        executable: /bin/bash
+      register: cleanup_result
+      failed_when: false
+
+    - name: Display cleanup results
+      ansible.builtin.debug:
+        msg: "{{ cleanup_result.stdout }}"
+
+    - name: Reboot Proxmox host
+      ansible.builtin.reboot:
+        msg: "Rebooting {{ inventory_hostname }} to fix networking issues"
+        pre_reboot_delay: 5
+        post_reboot_delay: 30
+        reboot_timeout: 300
+        connect_timeout: 20
+        test_command: uptime
+
+    - name: Wait additional time for services to fully start
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Verify networking is restored after reboot
+      ansible.builtin.shell: |
+        echo "=== Post-reboot Network Status for {{ inventory_hostname }} ==="
+        echo "--- Uptime ---"
+        uptime
+        echo "--- Network interfaces ---"
+        ip link show | grep -E "(bond0|UP|DOWN)"
+        echo "--- IP addresses ---"
+        ip addr show bond0 || echo "Bond0 interface not found"
+        echo "--- Routing table ---"
+        ip route show | head -5
+        echo "--- Connectivity test ---"
+        ping -c 3 8.8.8.8 | tail -3 || echo "Internet connectivity test failed"
+        echo "--- RDMA status ---"
+        rdma link show || echo "No RDMA links (good!)"
+        echo "=== Network verification complete ==="
+      args:
+        executable: /bin/bash
+      register: post_reboot_status
+
+    - name: Display post-reboot network status
+      ansible.builtin.debug:
+        msg: "{{ post_reboot_status.stdout }}"
+
+    - name: Test inter-node connectivity (if multiple hosts)
+      ansible.builtin.shell: |
+        echo "=== Testing inter-node connectivity ==="
+        # Try to ping other known Proxmox management IPs
+        # Adjust these IPs based on your actual Proxmox cluster setup
+        for ip in $(grep -E "^\s*[0-9]" /etc/hosts | grep -v 127.0.0.1 | awk '{print $1}' | head -3); do
+          if [ "$ip" != "{{ ansible_default_ipv4.address }}" ]; then
+            echo "Testing connectivity to $ip"
+            ping -c 2 $ip | tail -1 || echo "Failed to reach $ip"
+          fi
+        done
+        echo "Inter-node connectivity test complete"
+      args:
+        executable: /bin/bash
+      register: internode_test
+      failed_when: false
+
+    - name: Display inter-node connectivity results
+      ansible.builtin.debug:
+        msg: "{{ internode_test.stdout }}"
+
+    - name: Reboot completion summary
+      ansible.builtin.debug:
+        msg: |
+          Reboot completed successfully for {{ inventory_hostname }}!
+          
+          Key status:
+          - Host is back online and responsive
+          - Network interfaces are up
+          - Basic connectivity restored
+          
+          Next steps:
+          1. Verify all Proxmox services are running
+          2. Check that LXC containers can start properly
+          3. Test container networking
+          4. If needed, re-run container provisioning

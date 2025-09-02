@@ -59,7 +59,7 @@
       loop: "{{ proxmox_cluster.containers }}"
 
     - name: Clean up storage for this host's containers
-      ansible.builtin.include_tasks: proxmox-storage-cleanup.yml
+      ansible.builtin.include_tasks: utils/proxmox-storage-cleanup.yml
       when: item.host == inventory_hostname and (item.mounts is defined)
       loop: "{{ proxmox_cluster.containers | subelements('mounts', skip_missing=True) }}"
       loop_control:

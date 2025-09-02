@@ -21,6 +21,22 @@ function Write-Log { param($m) Write-Host $m }
 function ParseInventory {
     param($path)
     $hosts = @()
+    $clusterAdminUser = $null
+    
+    # First pass: find cluster_admin_user
+    foreach ($line in Get-Content -Path $path -ErrorAction Stop -Encoding UTF8) {
+        $l = $line -replace '#.*','' -replace ';.*',''
+        $l = $l.Trim()
+        if ([string]::IsNullOrWhiteSpace($l)) { continue }
+        
+        # Check for cluster_admin_user variable
+        if ($l -match 'cluster_admin_user=([^\s]+)') { 
+            $clusterAdminUser = $matches[1]
+            break
+        }
+    }
+    
+    # Second pass: parse hosts
     foreach ($line in Get-Content -Path $path -ErrorAction Stop -Encoding UTF8) {
         $l = $line -replace '#.*','' -replace ';.*',''
         $l = $l.Trim()
@@ -28,10 +44,12 @@ function ParseInventory {
         if ($l -match '^\[.*\]$') { continue }
         $first = ($l -split '\s+')[0]
         if ($first -like '*=*') { continue }
-        if ($first -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' -and $first -notmatch '^[A-Za-z0-9._-]+$') { continue }
+        # Skip group names that aren't actual hostnames
+        if ($first -match '^[a-zA-Z_][a-zA-Z0-9_]*$' -and $first -notmatch '\.' -and $first -notmatch '^[0-9]') { continue }
+        if ($first -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' -and $first -notmatch '^[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+') { continue }
         $user = $null
         if ($l -match 'ansible_user=([^\s]+)') { $user = $matches[1] }
-        $hosts += [pscustomobject]@{ Host = $first; User = $user }
+        $hosts += [pscustomobject]@{ Host = $first; User = $user; ClusterAdminUser = $clusterAdminUser }
     }
     return $hosts
 }
@@ -76,7 +94,7 @@ $HOSTS = @()
 if ($inventory) {
     $HOSTS = ParseInventory -path $inventory
 } else {
-    foreach ($h in $hostsFromArgs) { $HOSTS += [pscustomobject]@{ Host = $h; User = $null } }
+    foreach ($h in $hostsFromArgs) { $HOSTS += [pscustomobject]@{ Host = $h; User = $null; ClusterAdminUser = $null } }
 }
 
 if ($HOSTS.Count -eq 0) { Write-Log "Usage: trust_ssh_hosts.ps1 <hosts_inventory.ini> [--key-path <pubkey>] OR trust_ssh_hosts.ps1 [--user <user>] <host1> [host2 ...]"; exit 1 }
@@ -107,7 +125,10 @@ Write-Log "Using public key: $finalKey"
 $userMap = @{}
 if ($inventory) {
     foreach ($entry in $HOSTS) {
-        if (-not $entry.User) { $entry.User = 'root' }
+        # Use cluster_admin_user as fallback, then root
+        if (-not $entry.User) { 
+            $entry.User = if ($entry.ClusterAdminUser) { $entry.ClusterAdminUser } else { 'root' }
+        }
         $userMap[$entry.User] = $true
     }
     $passwords = @{}
@@ -127,9 +148,19 @@ foreach ($entry in $HOSTS) {
     if ($inventory) { $pw = $passwords[$user] } else { if (-not $TARGET_USER) { $TARGET_USER='adm4n' } $pw = Read-Host -AsSecureString "Enter SSH password for user $user on $targetHost"; $pw=[System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw)) }
 
     Write-Log "Trusting host: $targetHost (user: $user)"
-    # add host key
+    
+    # Remove existing host key entries to avoid conflicts
+    $knownHostsPath = Join-Path $env:USERPROFILE '.ssh\known_hosts'
+    if (Test-Path $knownHostsPath) {
+        Write-Log "Removing existing host key entries for $targetHost"
+        if (Get-Command ssh-keygen -ErrorAction SilentlyContinue) {
+            try { & ssh-keygen -R $targetHost 2>$null } catch {}
+        }
+    }
+    
+    # add new host key
     if (Get-Command ssh-keyscan -ErrorAction SilentlyContinue) {
-        try { & ssh-keyscan -H $targetHost >> (Join-Path $env:USERPROFILE '.ssh\\known_hosts') 2>$null } catch {}
+        try { & ssh-keyscan -H $targetHost >> $knownHostsPath 2>$null } catch {}
     }
     # push public key by piping it into ssh (user will be asked password interactively)
     $pubContent = Get-Content -Raw -Path $finalKey
@@ -140,7 +171,7 @@ foreach ($entry in $HOSTS) {
             $attempt++
             # Use PowerShell's ssh which will prompt for password; pipe pubkey to remote append
             $cmd = "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && chmod 700 ~/.ssh"
-            $pubContent | ssh -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o StrictHostKeyChecking=no $user@$targetHost $cmd
+            $pubContent | ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no $user@$targetHost $cmd
             $ok = $true
         } catch {
             Write-Log "Attempt $attempt/3 failed to push key to $targetHost; retrying..."

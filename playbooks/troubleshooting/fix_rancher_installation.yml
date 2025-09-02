@@ -1,0 +1,112 @@
+---
+- name: Fix Rancher installation issues
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Check current Rancher installation status
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        echo "=== Helm Releases in cattle-system ==="
+        /usr/local/bin/helm list -n cattle-system || echo "No releases found"
+        echo "=== Rancher Pods Status ==="
+        {{ rke2_data_path }}/bin/kubectl get pods -n cattle-system | grep rancher || echo "No rancher pods found"
+        echo "=== Cattle-system Namespace ==="
+        {{ rke2_data_path }}/bin/kubectl get namespace cattle-system || echo "Namespace not found"
+      args:
+        executable: /bin/bash
+      register: rancher_status
+      failed_when: false
+
+    - name: Display current Rancher status
+      ansible.builtin.debug:
+        msg: "{{ rancher_status.stdout }}"
+
+    - name: Remove stuck Rancher installation
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        echo "Removing existing Rancher installation..."
+        /usr/local/bin/helm uninstall rancher -n cattle-system || echo "No rancher release to remove"
+        echo "Waiting for pods to terminate..."
+        sleep 30
+        {{ rke2_data_path }}/bin/kubectl delete pods -n cattle-system --all --grace-period=0 --force || true
+        echo "Rancher cleanup completed"
+      args:
+        executable: /bin/bash
+      register: rancher_cleanup
+      when: inventory_hostname in groups['rke2_servers'][0]
+
+    - name: Display cleanup results
+      ansible.builtin.debug:
+        msg: "{{ rancher_cleanup.stdout }}"
+      when: inventory_hostname in groups['rke2_servers'][0]
+
+    - name: Wait for namespace to be clean
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        for i in {1..30}; do
+          if ! {{ rke2_data_path }}/bin/kubectl get pods -n cattle-system | grep -q rancher; then
+            echo "Namespace is clean"
+            exit 0
+          fi
+          echo "Waiting for pods to terminate... ($i/30)"
+          sleep 10
+        done
+      args:
+        executable: /bin/bash
+      when: inventory_hostname in groups['rke2_servers'][0]
+
+    - name: Reinstall Rancher cleanly
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        /usr/local/bin/helm install rancher rancher-stable/rancher \
+          --namespace cattle-system \
+          --set hostname="{{ rancher_hostname }}" \
+          --set bootstrapPassword="{{ rancher_bootstrap_password }}" \
+          --set replicas=1 \
+          --set ingress.tls.source=rancher \
+          --set resources.requests.cpu=250m \
+          --set resources.requests.memory=512Mi \
+          --set resources.limits.cpu=500m \
+          --set resources.limits.memory=1Gi \
+          --set extraEnv[0].name=CATTLE_SYSTEM_DEFAULT_REGISTRY \
+          --set extraEnv[0].value="" \
+          --set useBundledSystemChart=true \
+          --timeout=600s \
+          --wait
+      args:
+        executable: /bin/bash
+      register: rancher_reinstall
+      retries: 3
+      delay: 60
+      until: rancher_reinstall.rc == 0
+      when: inventory_hostname in groups['rke2_servers'][0]
+
+    - name: Display reinstallation results
+      ansible.builtin.debug:
+        msg: |
+          Rancher reinstallation: {{ 'SUCCESS' if rancher_reinstall.rc == 0 else 'FAILED' }}
+          {% if rancher_reinstall.rc != 0 %}
+          Error: {{ rancher_reinstall.stderr }}
+          {% endif %}
+      when: inventory_hostname in groups['rke2_servers'][0]
+
+    - name: Final status check
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+        echo "=== Final Rancher Status ==="
+        /usr/local/bin/helm list -n cattle-system
+        echo "=== Pod Status ==="
+        {{ rke2_data_path }}/bin/kubectl get pods -n cattle-system
+        echo "=== Service Status ==="
+        {{ rke2_data_path }}/bin/kubectl get svc -n cattle-system
+      args:
+        executable: /bin/bash
+      register: final_status
+      when: inventory_hostname in groups['rke2_servers'][0]
+
+    - name: Display final status
+      ansible.builtin.debug:
+        msg: "{{ final_status.stdout }}"
+      when: inventory_hostname in groups['rke2_servers'][0]

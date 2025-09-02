@@ -32,6 +32,15 @@
         modprobe nf_nat || true
         modprobe xt_conntrack || true
         modprobe br_netfilter || true
+        modprobe rdma_cm || true
+        modprobe ib_uverbs || true
+        modprobe rdma_rxe || true
+        modprobe xprtrdma || true
+        modprobe svcrdma || true
+        modprobe ib_umad || true
+        modprobe ib_mthca || true
+        modprobe ib_iser || true
+        modprobe ib_ipoib || true
       args:
         executable: /bin/bash
       changed_when: false
@@ -48,6 +57,15 @@
         - nf_nat
         - xt_conntrack
         - br_netfilter
+        - rdma_cm
+        - ib_uverbs
+        - rdma_rxe
+        - xprtrdma
+        - ib_umad
+        - svcrdma
+        - ib_mthca
+        - ib_iser
+        - ib_ipoib
 
     - name: Configure sysctl for Kubernetes networking
       ansible.builtin.blockinfile:
@@ -168,7 +186,7 @@
           features: nesting=1,fuse=1,keyctl=1,mknod=1,mount=cifs;nfs
           lxc.cgroup2.devices.allow: a
           lxc.cgroup2.devices.allow: b
-          lxc.cgroup2.devices.allow: c
+          lxc.cgroup2.devices.allow: c 
           lxc.cap.drop =
           lxc.mount.auto: proc:rw sys:rw cgroup:rw
           lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
@@ -179,8 +197,9 @@
           lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
           lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
           lxc.mount.entry: /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
+          lxc.mount.entry: /dev/infiniband dev/infiniband none bind,optional,create=dir
           lxc.prlimit.memlock: unlimited
-      loop: "{{ proxmox_cluster.containers }}"
+      loop: "{{ proxmox_cluster.containers }}" 
 
     - name: Start LXC containers
       when: item.host == inventory_hostname
@@ -247,7 +266,7 @@
         executable: /bin/bash
       loop: "{{ proxmox_cluster.containers }}"
 
-    # ===== HIGH-SPEED NETWORKING CONFIGURATION =====
+    # ===== HIGH-SPEED NETWORKING AND INFINIBAND CONFIGURATION =====
     
     - name: Configure hostname advertising and network discovery
       when: item.host == inventory_hostname
@@ -314,6 +333,114 @@
       args:
         executable: /bin/bash
       loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install InfiniBand and RDMA packages (phase 1)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt-get update
+        pct exec {{ item.id }} -- apt-get install -y rdma-core ibverbs-utils infiniband-diags rdmacm-utils perftest
+        echo "InfiniBand RDMA packages phase 1 installed for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install InfiniBand and RDMA packages (phase 2)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt-get install -y build-essential pkg-config vlan automake autoconf dkms git
+        echo "InfiniBand build tools installed for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install InfiniBand and RDMA packages (phase 3)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt-get install -y libibverbs-dev librdmacm-dev libibmad-dev libibumad-dev
+        echo "InfiniBand development libraries installed for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install InfiniBand and RDMA packages (phase 4)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt-get install -y libtool ibutils ibverbs-utils rdmacm-utils infiniband-diags perftest
+        echo "InfiniBand utilities installed for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install InfiniBand and RDMA packages (phase 5)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt-get install -y numactl libnuma-dev libnl-3-200 libnl-route-3-200 libnl-route-3-dev libnl-utils
+        echo "NUMA and netlink libraries installed for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install InfiniBand and RDMA packages (phase 6)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt-get install -y 'libibverbs*' 'librdma*' 'libibmad.*' 'libibumad*'
+        echo "Additional InfiniBand libraries installed for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Reboot containers after network configuration
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        echo "Rebooting container {{ item.id }} after network configuration"
+        pct reboot {{ item.id }} || (sleep 2 && pct start {{ item.id }})
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Wait for containers to restart after network configuration
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        for i in {1..60}; do
+          if pct exec {{ item.id }} -- test -f /proc/version; then
+            echo "Container {{ item.id }} is ready after reboot"
+            exit 0
+          fi
+          echo "Waiting for container {{ item.id }} to be ready after reboot... ($i/60)"
+          sleep 5
+        done
+        echo "Container {{ item.id }} failed to restart properly"
+        exit 1
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Test InfiniBand configuration (ignore errors)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        echo "=== InfiniBand Test Results for Container {{ item.id }} ==="
+        echo "--- InfiniBand devices in /dev ---"
+        pct exec {{ item.id }} -- ls /dev/infiniband 2>/dev/null || echo "No InfiniBand devices found"
+        echo "--- IB Verbs devices ---"
+        pct exec {{ item.id }} -- ibv_devices 2>/dev/null || echo "ibv_devices command failed"
+        echo "--- IB Device info ---"
+        pct exec {{ item.id }} -- ibv_devinfo 2>/dev/null || echo "ibv_devinfo command failed"
+        echo "--- RDMA resources ---"
+        pct exec {{ item.id }} -- rdma res show 2>/dev/null || echo "rdma res show command failed"
+        echo "--- Memory lock limit ---"
+        pct exec {{ item.id }} -- ulimit -l 2>/dev/null || echo "ulimit -l command failed"
+        echo "=== End Test Results for Container {{ item.id }} ==="
+      args:
+        executable: /bin/bash
+      register: infiniband_test_results
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Display InfiniBand test results
+      when: item.item.host == inventory_hostname
+      ansible.builtin.debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ infiniband_test_results.results | default([]) }}"
 
     - name: Start containers if not running
       when: item.host == inventory_hostname

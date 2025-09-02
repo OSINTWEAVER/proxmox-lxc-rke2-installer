@@ -1,0 +1,141 @@
+---
+- name: Setup RDMA and InfiniBand support on Proxmox hosts
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 300
+
+    - name: Install RDMA core packages
+      ansible.builtin.apt:
+        name: rdma-core
+        state: present
+
+    - name: Load existing kernel modules (from original playbook)
+      ansible.builtin.shell: |
+        set -e
+        modprobe overlay || true
+        modprobe ip_tables || true
+        modprobe ip6_tables || true
+        modprobe nf_nat || true
+        modprobe xt_conntrack || true
+        modprobe br_netfilter || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Load RDMA kernel modules
+      ansible.builtin.shell: |
+        set -e
+        modprobe rdma_cm || true
+        modprobe ib_uverbs || true
+        modprobe rdma_rxe || true
+        modprobe xprtrdma || true
+        modprobe svcrdma || true
+        modprobe ib_umad || true
+        modprobe ib_mthca || true
+        modprobe ib_iser || true
+        modprobe ib_ipoib || true
+        echo "RDMA kernel modules loaded"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Persist all kernel modules across reboots
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: "{{ item }}"
+        create: true
+      loop:
+        - overlay
+        - ip_tables
+        - ip6_tables
+        - nf_nat
+        - xt_conntrack
+        - br_netfilter
+        - rdma_cm
+        - ib_uverbs
+        - rdma_rxe
+        - xprtrdma
+        - ib_umad
+        - svcrdma
+        - ib_mthca
+        - ib_iser
+        - ib_ipoib
+
+    - name: Create RDMA udev rules file
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/40-rdma.rules
+        content: |
+          KERNEL=="uverbs*", NAME="infiniband/%k", MODE="0666"
+          KERNEL=="ucm*", NAME="infiniband/%k", MODE="0666"
+          KERNEL=="rdma_cm", NAME="infiniband/%k", MODE="0666"
+        mode: '0666'
+        owner: root
+        group: root
+
+    - name: Reload udev rules and trigger
+      ansible.builtin.shell: |
+        udevadm control --reload-rules
+        udevadm trigger
+        echo "udev rules reloaded and triggered"
+      args:
+        executable: /bin/bash
+      register: udev_reload_result
+
+    - name: Display udev reload results
+      ansible.builtin.debug:
+        msg: "{{ udev_reload_result.stdout }}"
+
+    # ===== RDMA AND INFINIBAND TESTING =====
+    
+    - name: Test RDMA and InfiniBand configuration (ignore errors)
+      ansible.builtin.shell: |
+        echo "=== RDMA and InfiniBand Test Results for Host {{ inventory_hostname }} ==="
+        echo "--- Loaded RDMA kernel modules ---"
+        lsmod | grep -E "rdma_cm|ib_uverbs|rdma_rxe" || echo "No RDMA modules found in lsmod"
+        echo "--- InfiniBand devices in /dev ---"
+        ls -l /dev/infiniband/ 2>/dev/null || echo "No /dev/infiniband/ directory found"
+        echo "--- IB Verbs devices ---"
+        ibv_devices 2>/dev/null || echo "ibv_devices command failed"
+        echo "--- IB Device info ---"
+        ibv_devinfo 2>/dev/null || echo "ibv_devinfo command failed"
+        echo "--- RDMA resources ---"
+        rdma res show 2>/dev/null || echo "rdma res show command failed"
+        echo "--- Memory lock limit ---"
+        ulimit -l 2>/dev/null || echo "ulimit -l command failed"
+        echo "=== End Test Results for Host {{ inventory_hostname }} ==="
+      args:
+        executable: /bin/bash
+      register: rdma_test_results
+      failed_when: false
+
+    - name: Display RDMA test results
+      ansible.builtin.debug:
+        msg: "{{ rdma_test_results.stdout }}"
+
+    - name: Summary of RDMA setup completion
+      ansible.builtin.debug:
+        msg: |
+          RDMA setup completed for host {{ inventory_hostname }}:
+          - RDMA core packages installed
+          - Kernel modules loaded and persisted
+          - udev rules created and reloaded
+          - Test results displayed above
+          
+          MANUAL STEP REQUIRED:
+          You must manually create RDMA links based on your network interface configuration.
+          Example: rdma link add rxe0 type rxe netdev <your_interface>
+          Replace <your_interface> with your actual network interface (e.g., bond0, eth0, etc.)
+
+    - name: Restart Proxmox host to ensure all changes take effect
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        connect_timeout: 5
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: uptime

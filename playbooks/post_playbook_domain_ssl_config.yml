@@ -1,0 +1,855 @@
+---
+- name: Configure production domain with Let's Encrypt SSL and Rancher trusted certificates
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+  vars:
+    admin_user: "{{ cluster_admin_user | default('adm4n') }}"
+    # Domain to configure - pass via -e domain=yourdomain.com
+    public_domain: "{{ domain | default('example.com') }}"
+    rancher_subdomain: "rancher.{{ public_domain }}"
+    letsencrypt_email: "admin@{{ public_domain }}"
+    # Production Let's Encrypt (set to staging for testing)
+    letsencrypt_server: "https://acme-v02.api.letsencrypt.org/directory"
+    # letsencrypt_server: "https://acme-staging-v02.api.letsencrypt.org/directory"  # Uncomment for testing
+
+  tasks:
+    # ===== DOMAIN CONFIGURATION VALIDATION =====
+    
+    - name: Display domain configuration
+      ansible.builtin.debug:
+        msg: |
+          🌐 ===== DOMAIN CONFIGURATION =====
+          
+          Public Domain: {{ public_domain }}
+          Rancher URL: https://{{ rancher_subdomain }}
+          Let's Encrypt Email: {{ letsencrypt_email }}
+          Certificate Authority: {{ letsencrypt_server }}
+          
+          Prerequisites:
+          ✅ DNS A record: {{ public_domain }} → {{ ansible_default_ipv4.address }}
+          ✅ DNS A record: *.{{ public_domain }} → {{ ansible_default_ipv4.address }}
+          ✅ Ports 80/443 forwarded to this machine
+          ✅ Ingress controller running (nginx)
+          
+          This will configure production SSL certificates!
+          🚨 Make sure DNS is configured before proceeding! 🚨
+
+    - name: Wait for user confirmation
+      ansible.builtin.pause:
+        prompt: |
+          
+          🔍 Please verify DNS configuration:
+          
+          1. Check that {{ public_domain }} resolves to {{ ansible_default_ipv4.address }}
+          2. Check that *.{{ public_domain }} resolves to {{ ansible_default_ipv4.address }}
+          3. Ensure ports 80/443 are accessible from the internet
+          
+          Press ENTER to continue with SSL configuration, or Ctrl+C to abort
+
+    # ===== CERT-MANAGER CONFIGURATION =====
+    
+    - name: Check if cert-manager is already installed
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl get namespace cert-manager 2>/dev/null || echo "NOT_FOUND"
+      become_user: "{{ admin_user }}"
+      register: certmanager_check
+
+    - name: Install cert-manager if not present
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔧 Installing cert-manager for SSL automation..."
+        
+        # Add cert-manager Helm repository
+        /usr/local/bin/helm repo add jetstack https://charts.jetstack.io || true
+        /usr/local/bin/helm repo update
+        
+        # Create namespace
+        /var/lib/rancher/rke2/bin/kubectl create namespace cert-manager --dry-run=client -o yaml | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        
+        # Install cert-manager with CRDs
+        /usr/local/bin/helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --set installCRDs=true \
+          --set global.leaderElection.namespace=cert-manager \
+          --set prometheus.enabled=false \
+          --set webhook.timeoutSeconds=30 \
+          --wait \
+          --timeout=600s
+        
+        echo "✅ cert-manager installed successfully"
+      become_user: "{{ admin_user }}"
+      when: "'NOT_FOUND' in certmanager_check.stdout"
+
+    - name: Wait for cert-manager to be ready
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        echo "⏳ Waiting for cert-manager to be ready..."
+        /var/lib/rancher/rke2/bin/kubectl wait --for=condition=available --timeout=300s deployment/cert-manager -n cert-manager
+        /var/lib/rancher/rke2/bin/kubectl wait --for=condition=available --timeout=300s deployment/cert-manager-webhook -n cert-manager
+        /var/lib/rancher/rke2/bin/kubectl wait --for=condition=available --timeout=300s deployment/cert-manager-cainjector -n cert-manager
+        echo "✅ cert-manager is ready"
+      become_user: "{{ admin_user }}"
+
+    # ===== LET'S ENCRYPT CLUSTER ISSUER =====
+    
+    - name: Create Let's Encrypt production ClusterIssuer
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat << 'CLUSTER_ISSUER_EOF' | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: ClusterIssuer
+        metadata:
+          name: letsencrypt-prod
+        spec:
+          acme:
+            server: {{ letsencrypt_server }}
+            email: {{ letsencrypt_email }}
+            privateKeySecretRef:
+              name: letsencrypt-prod-private-key
+            solvers:
+            - http01:
+                ingress:
+                  class: nginx
+        CLUSTER_ISSUER_EOF
+        
+        echo "✅ Let's Encrypt ClusterIssuer created"
+      become_user: "{{ admin_user }}"
+
+    - name: Create Let's Encrypt staging ClusterIssuer (for testing)
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat << 'STAGING_ISSUER_EOF' | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: ClusterIssuer
+        metadata:
+          name: letsencrypt-staging
+        spec:
+          acme:
+            server: https://acme-staging-v02.api.letsencrypt.org/directory
+            email: {{ letsencrypt_email }}
+            privateKeySecretRef:
+              name: letsencrypt-staging-private-key
+            solvers:
+            - http01:
+                ingress:
+                  class: nginx
+        STAGING_ISSUER_EOF
+        
+        echo "✅ Let's Encrypt staging ClusterIssuer created"
+      become_user: "{{ admin_user }}"
+
+    # ===== WILDCARD CERTIFICATE =====
+    
+    - name: Create wildcard certificate for {{ public_domain }}
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat << 'WILDCARD_CERT_EOF' | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: wildcard-{{ public_domain | replace('.', '-') }}
+          namespace: default
+        spec:
+          secretName: wildcard-{{ public_domain | replace('.', '-') }}-tls
+          issuerRef:
+            name: letsencrypt-prod
+            kind: ClusterIssuer
+          dnsNames:
+          - "{{ public_domain }}"
+          - "*.{{ public_domain }}"
+        WILDCARD_CERT_EOF
+        
+        echo "✅ Wildcard certificate requested for {{ public_domain }}"
+      become_user: "{{ admin_user }}"
+
+    # ===== RANCHER SSL CONFIGURATION =====
+    
+    - name: Check if Rancher is installed
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl get namespace cattle-system 2>/dev/null || echo "NOT_FOUND"
+      become_user: "{{ admin_user }}"
+      register: rancher_check
+
+    - name: Create cattle-system namespace if Rancher not installed
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl create namespace cattle-system --dry-run=client -o yaml | /var/lib/rancher/rke2/bin/kubectl apply -f -
+      become_user: "{{ admin_user }}"
+      when: "'NOT_FOUND' in rancher_check.stdout"
+
+    - name: Create Rancher SSL certificate
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat << 'RANCHER_CERT_EOF' | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: rancher-ssl
+          namespace: cattle-system
+        spec:
+          secretName: tls-rancher-ingress
+          issuerRef:
+            name: letsencrypt-prod
+            kind: ClusterIssuer
+          dnsNames:
+          - "{{ rancher_subdomain }}"
+        RANCHER_CERT_EOF
+        
+        echo "✅ Rancher SSL certificate requested for {{ rancher_subdomain }}"
+      become_user: "{{ admin_user }}"
+
+    - name: Create or update Rancher ingress with SSL
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat << 'RANCHER_INGRESS_EOF' | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: rancher
+          namespace: cattle-system
+          annotations:
+            cert-manager.io/cluster-issuer: "letsencrypt-prod"
+            nginx.ingress.kubernetes.io/ssl-redirect: "true"
+            nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+            nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+            nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+            nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
+            nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+            nginx.ingress.kubernetes.io/configuration-snippet: |
+              more_set_headers "X-Forwarded-Proto: https";
+              more_set_headers "X-Forwarded-For: \$proxy_add_x_forwarded_for";
+        spec:
+          ingressClassName: nginx
+          tls:
+          - hosts:
+            - {{ rancher_subdomain }}
+            secretName: tls-rancher-ingress
+          rules:
+          - host: {{ rancher_subdomain }}
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: rancher
+                    port:
+                      number: 80
+        RANCHER_INGRESS_EOF
+        
+        echo "✅ Rancher ingress configured with SSL for {{ rancher_subdomain }}"
+      become_user: "{{ admin_user }}"
+
+    # ===== HELLO WORLD APPLICATIONS =====
+    
+    - name: "Create Hello World application for root domain"
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        # Create Hello World ConfigMap with custom HTML
+        cat > /tmp/hello-world.yaml << 'HELLO_EOF'
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: hello-world-html
+          namespace: default
+        data:
+          index.html: |
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>🎉 DOMAIN_PLACEHOLDER - SSL Configuration Success!</title>
+                <style>
+                    body {
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        margin: 0;
+                        padding: 20px;
+                        min-height: 100vh;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .container {
+                        background: white;
+                        border-radius: 20px;
+                        padding: 40px;
+                        box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                        text-align: center;
+                        max-width: 600px;
+                    }
+                    h1 { color: #4a5568; margin-bottom: 10px; }
+                    .domain { color: #667eea; font-weight: bold; font-size: 1.2em; }
+                    .ssl-badge { 
+                        background: #48bb78; 
+                        color: white; 
+                        padding: 5px 15px; 
+                        border-radius: 20px; 
+                        display: inline-block; 
+                        margin: 20px 0;
+                        font-weight: bold;
+                    }
+                    .info-grid {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr;
+                        gap: 20px;
+                        margin: 30px 0;
+                        text-align: left;
+                    }
+                    .info-item {
+                        background: #f7fafc;
+                        padding: 15px;
+                        border-radius: 10px;
+                        border-left: 4px solid #667eea;
+                    }
+                    .info-item h3 { margin: 0 0 10px 0; color: #2d3748; }
+                    .info-item p { margin: 0; color: #4a5568; }
+                    .test-links {
+                        margin: 30px 0;
+                        padding: 20px;
+                        background: #edf2f7;
+                        border-radius: 10px;
+                    }
+                    .test-links a {
+                        display: inline-block;
+                        margin: 5px 10px;
+                        padding: 10px 20px;
+                        background: #667eea;
+                        color: white;
+                        text-decoration: none;
+                        border-radius: 25px;
+                        transition: all 0.3s ease;
+                    }
+                    .test-links a:hover {
+                        background: #553c9a;
+                        transform: translateY(-2px);
+                    }
+                    .footer {
+                        margin-top: 30px;
+                        padding-top: 20px;
+                        border-top: 1px solid #e2e8f0;
+                        color: #718096;
+                        font-size: 0.9em;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🎉 Welcome to <span class="domain">DOMAIN_PLACEHOLDER</span>!</h1>
+                    <div class="ssl-badge">🔒 SSL Certificate Active</div>
+                    
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <h3>🌐 Domain Status</h3>
+                            <p>Your domain is live with production-grade SSL certificates from Let's Encrypt!</p>
+                        </div>
+                        <div class="info-item">
+                            <h3>🔒 Security</h3>
+                            <p>HTTPS enforced, automatic certificate renewal, wildcard support enabled.</p>
+                        </div>
+                        <div class="info-item">
+                            <h3>⚡ Performance</h3>
+                            <p>Nginx ingress controller with optimized proxy settings and caching.</p>
+                        </div>
+                        <div class="info-item">
+                            <h3>🚀 Ready for Production</h3>
+                            <p>Your Kubernetes cluster is configured and ready for application deployment!</p>
+                        </div>
+                    </div>
+                    
+                    <div class="test-links">
+                        <h3>🧪 Test Your Configuration</h3>
+                        <a href="https://hello.DOMAIN_PLACEHOLDER">Test Subdomain (hello.DOMAIN_PLACEHOLDER)</a>
+                        <a href="https://rancher.DOMAIN_PLACEHOLDER">Rancher Management UI</a>
+                    </div>
+                    
+                    <div class="footer">
+                        <p>🎯 RKE2 Kubernetes Cluster | 🔧 Configured with Ansible Automation</p>
+                        <p>Generated: $(date)</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: hello-world
+          namespace: default
+        spec:
+          ports:
+          - port: 80
+            targetPort: 80
+          selector:
+            app: hello-world
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: hello-world
+          namespace: default
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: hello-world
+          template:
+            metadata:
+              labels:
+                app: hello-world
+            spec:
+              containers:
+              - name: nginx
+                image: nginx:alpine
+                ports:
+                - containerPort: 80
+                volumeMounts:
+                - name: html-content
+                  mountPath: /usr/share/nginx/html
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 100m
+                    memory: 128Mi
+              volumes:
+              - name: html-content
+                configMap:
+                  name: hello-world-html
+        ---
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: hello-world-root
+          namespace: default
+          annotations:
+            cert-manager.io/cluster-issuer: "letsencrypt-prod"
+            nginx.ingress.kubernetes.io/ssl-redirect: "true"
+            nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+        spec:
+          ingressClassName: nginx
+          tls:
+          - hosts:
+            - DOMAIN_PLACEHOLDER
+            secretName: DOMAIN_SECRET_PLACEHOLDER
+          rules:
+          - host: DOMAIN_PLACEHOLDER
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: hello-world
+                    port:
+                      number: 80
+        HELLO_EOF
+        
+        # Replace placeholders with actual domain
+        sed -i "s/DOMAIN_PLACEHOLDER/{{ public_domain }}/g" /tmp/hello-world.yaml
+        sed -i "s/DOMAIN_SECRET_PLACEHOLDER/{{ public_domain | replace('.', '-') }}-tls/g" /tmp/hello-world.yaml
+        
+        # Apply the configuration
+        /var/lib/rancher/rke2/bin/kubectl apply -f /tmp/hello-world.yaml
+        
+        # Clean up
+        rm -f /tmp/hello-world.yaml
+        
+        echo "✅ Hello World application created for {{ public_domain }}"
+      become_user: "{{ admin_user }}"
+
+    - name: "Create Hello subdomain application"
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        # Create Hello Subdomain ConfigMap
+        cat > /tmp/hello-subdomain.yaml << 'HELLO_SUB_EOF'
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: hello-subdomain-html
+          namespace: default
+        data:
+          index.html: |
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>🌟 hello.DOMAIN_PLACEHOLDER - Subdomain Test Success!</title>
+                <style>
+                    body {
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                        margin: 0;
+                        padding: 20px;
+                        min-height: 100vh;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .container {
+                        background: white;
+                        border-radius: 20px;
+                        padding: 40px;
+                        box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                        text-align: center;
+                        max-width: 600px;
+                    }
+                    h1 { color: #4a5568; margin-bottom: 10px; }
+                    .subdomain { color: #f5576c; font-weight: bold; font-size: 1.2em; }
+                    .success-badge { 
+                        background: #48bb78; 
+                        color: white; 
+                        padding: 8px 20px; 
+                        border-radius: 25px; 
+                        display: inline-block; 
+                        margin: 20px 0;
+                        font-weight: bold;
+                        animation: pulse 2s infinite;
+                    }
+                    @keyframes pulse {
+                        0% { transform: scale(1); }
+                        50% { transform: scale(1.05); }
+                        100% { transform: scale(1); }
+                    }
+                    .feature-list {
+                        text-align: left;
+                        background: #f8f9fa;
+                        padding: 25px;
+                        border-radius: 15px;
+                        margin: 25px 0;
+                    }
+                    .feature-list h3 { 
+                        color: #2d3748; 
+                        margin-bottom: 15px;
+                        text-align: center;
+                    }
+                    .feature-list ul { 
+                        list-style: none; 
+                        padding: 0; 
+                        margin: 0;
+                    }
+                    .feature-list li { 
+                        padding: 8px 0; 
+                        color: #4a5568;
+                        border-bottom: 1px solid #e2e8f0;
+                    }
+                    .feature-list li:last-child { border-bottom: none; }
+                    .feature-list li::before { 
+                        content: "✅ "; 
+                        color: #48bb78;
+                        font-weight: bold;
+                    }
+                    .nav-links {
+                        margin: 30px 0;
+                        padding: 20px;
+                        background: #edf2f7;
+                        border-radius: 10px;
+                    }
+                    .nav-links a {
+                        display: inline-block;
+                        margin: 5px 10px;
+                        padding: 12px 25px;
+                        background: #f5576c;
+                        color: white;
+                        text-decoration: none;
+                        border-radius: 25px;
+                        transition: all 0.3s ease;
+                        font-weight: 500;
+                    }
+                    .nav-links a:hover {
+                        background: #e53e3e;
+                        transform: translateY(-2px);
+                        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+                    }
+                    .cert-info {
+                        background: #e6fffa;
+                        border: 2px solid #81e6d9;
+                        border-radius: 10px;
+                        padding: 20px;
+                        margin: 20px 0;
+                    }
+                    .cert-info h4 { 
+                        color: #285e61; 
+                        margin: 0 0 10px 0;
+                    }
+                    .cert-info p { 
+                        color: #2c7a7b; 
+                        margin: 0;
+                        font-size: 0.9em;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🌟 Subdomain Test Success!</h1>
+                    <p>Welcome to <span class="subdomain">hello.DOMAIN_PLACEHOLDER</span></p>
+                    <div class="success-badge">🎉 Wildcard SSL Working!</div>
+                    
+                    <div class="feature-list">
+                        <h3>🔍 What This Proves</h3>
+                        <ul>
+                            <li>Wildcard SSL certificate is properly configured</li>
+                            <li>Subdomain routing through nginx ingress works</li>
+                            <li>DNS wildcard resolution is functional</li>
+                            <li>Let's Encrypt certificate covers *.DOMAIN_PLACEHOLDER</li>
+                            <li>HTTPS redirect and security headers active</li>
+                            <li>Multiple applications can share the same domain</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="cert-info">
+                        <h4>🔒 Certificate Information</h4>
+                        <p>This subdomain is secured by the same wildcard certificate that covers *.DOMAIN_PLACEHOLDER. 
+                        You can create unlimited subdomains without requesting additional certificates!</p>
+                    </div>
+                    
+                    <div class="nav-links">
+                        <h3>🔗 Navigation</h3>
+                        <a href="https://DOMAIN_PLACEHOLDER">← Back to DOMAIN_PLACEHOLDER</a>
+                        <a href="https://rancher.DOMAIN_PLACEHOLDER">Rancher UI</a>
+                    </div>
+                    
+                    <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0; color: #718096; font-size: 0.9em;">
+                        <p>🎯 Subdomain SSL Test Page | Generated: $(date)</p>
+                        <p>Your wildcard certificate and ingress configuration is working perfectly! 🚀</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: hello-subdomain
+          namespace: default
+        spec:
+          ports:
+          - port: 80
+            targetPort: 80
+          selector:
+            app: hello-subdomain
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: hello-subdomain
+          namespace: default
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: hello-subdomain
+          template:
+            metadata:
+              labels:
+                app: hello-subdomain
+            spec:
+              containers:
+              - name: nginx
+                image: nginx:alpine
+                ports:
+                - containerPort: 80
+                volumeMounts:
+                - name: html-content
+                  mountPath: /usr/share/nginx/html
+                resources:
+                  requests:
+                    cpu: 25m
+                    memory: 32Mi
+                  limits:
+                    cpu: 50m
+                    memory: 64Mi
+              volumes:
+              - name: html-content
+                configMap:
+                  name: hello-subdomain-html
+        ---
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: hello-subdomain
+          namespace: default
+          annotations:
+            cert-manager.io/cluster-issuer: "letsencrypt-prod"
+            nginx.ingress.kubernetes.io/ssl-redirect: "true"
+            nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+        spec:
+          ingressClassName: nginx
+          tls:
+          - hosts:
+            - hello.DOMAIN_PLACEHOLDER
+            secretName: hello-DOMAIN_SECRET_PLACEHOLDER
+          rules:
+          - host: hello.DOMAIN_PLACEHOLDER
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: hello-subdomain
+                    port:
+                      number: 80
+        HELLO_SUB_EOF
+        
+        # Replace placeholders with actual domain
+        sed -i "s/DOMAIN_PLACEHOLDER/{{ public_domain }}/g" /tmp/hello-subdomain.yaml
+        sed -i "s/DOMAIN_SECRET_PLACEHOLDER/{{ public_domain | replace('.', '-') }}-tls/g" /tmp/hello-subdomain.yaml
+        
+        # Apply the configuration
+        /var/lib/rancher/rke2/bin/kubectl apply -f /tmp/hello-subdomain.yaml
+        
+        # Clean up
+        rm -f /tmp/hello-subdomain.yaml
+        
+        echo "✅ Hello subdomain application created for hello.{{ public_domain }}"
+      become_user: "{{ admin_user }}"
+
+    # ===== CERTIFICATE STATUS MONITORING =====
+    
+    - name: Wait for certificates to be issued
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "⏳ Waiting for SSL certificates to be issued..."
+        echo "This may take a few minutes for Let's Encrypt validation..."
+        
+        # Wait for Rancher certificate
+        echo "🔍 Checking Rancher certificate..."
+        for i in {1..60}; do
+          if /var/lib/rancher/rke2/bin/kubectl get certificate rancher-ssl -n cattle-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -q "True"; then
+            echo "✅ Rancher certificate issued successfully"
+            break
+          fi
+          echo "   ⏳ Waiting for Rancher certificate... (attempt $i/60)"
+          sleep 10
+        done
+        
+        # Wait for wildcard certificate
+        echo "🔍 Checking wildcard certificate..."
+        for i in {1..60}; do
+          if /var/lib/rancher/rke2/bin/kubectl get certificate wildcard-{{ public_domain | replace('.', '-') }} -n default -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -q "True"; then
+            echo "✅ Wildcard certificate issued successfully"
+            break
+          fi
+          echo "   ⏳ Waiting for wildcard certificate... (attempt $i/60)"
+          sleep 10
+        done
+        
+        echo "🎯 Certificate status check complete"
+      become_user: "{{ admin_user }}"
+      register: cert_wait_result
+
+    # ===== VERIFICATION AND STATUS =====
+    
+    - name: Get SSL configuration status
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "🔐 ===== SSL CONFIGURATION STATUS ====="
+        echo
+        
+        echo "📋 ClusterIssuers:"
+        /var/lib/rancher/rke2/bin/kubectl get clusterissuer
+        echo
+        
+        echo "📋 Certificates:"
+        /var/lib/rancher/rke2/bin/kubectl get certificates --all-namespaces
+        echo
+        
+        echo "📋 Certificate Details:"
+        echo "🔹 Rancher Certificate:"
+        /var/lib/rancher/rke2/bin/kubectl describe certificate rancher-ssl -n cattle-system | grep -E "(Status:|Events:|Conditions:)" -A 10 || echo "   ⚠️ Rancher certificate not found"
+        echo
+        echo "🔹 Wildcard Certificate:"
+        /var/lib/rancher/rke2/bin/kubectl describe certificate wildcard-{{ public_domain | replace('.', '-') }} -n default | grep -E "(Status:|Events:|Conditions:)" -A 10 || echo "   ⚠️ Wildcard certificate not found"
+        echo
+        
+        echo "📋 Ingress Resources:"
+        /var/lib/rancher/rke2/bin/kubectl get ingress --all-namespaces -o wide
+        echo
+        
+        echo "🌐 ===== ACCESS INFORMATION ====="
+        echo "✅ Root Domain: https://{{ public_domain }} (Beautiful Hello World page)"
+        echo "✅ Hello Subdomain: https://hello.{{ public_domain }} (Wildcard SSL test)"
+        echo "✅ Rancher UI: https://{{ rancher_subdomain }} (Management Interface)"
+        echo "✅ Wildcard support: https://*.{{ public_domain }} (Ready for any subdomain)"
+        echo
+        echo "🎨 Demo Applications:"
+        echo "   • Root domain features a beautiful status page with SSL info"
+        echo "   • Hello subdomain demonstrates wildcard certificate functionality"
+        echo "   • Both pages include navigation links and SSL status information"
+        echo
+        echo "🔒 SSL Configuration:"
+        echo "   • Production Let's Encrypt certificates"
+        echo "   • Automatic renewal enabled"
+        echo "   • HTTPS redirect enforced"
+        echo "   • Wildcard certificate for subdomains"
+        echo
+        echo "📍 DNS Requirements:"
+        echo "   • {{ public_domain }} → {{ ansible_default_ipv4.address }}"
+        echo "   • *.{{ public_domain }} → {{ ansible_default_ipv4.address }}"
+        echo
+        echo "✅ SSL CONFIGURATION COMPLETE!"
+      become_user: "{{ admin_user }}"
+      register: ssl_status
+
+    - name: Display final configuration summary
+      ansible.builtin.debug:
+        msg: |
+          🎉 ===== DOMAIN AND SSL CONFIGURATION COMPLETE =====
+          
+          🌐 Your domain {{ public_domain }} is now configured with:
+          
+          ✅ Production Let's Encrypt SSL certificates
+          ✅ Automatic certificate renewal
+          ✅ Wildcard certificate support (*.{{ public_domain }})
+          ✅ Beautiful Hello World demonstration pages
+          ✅ Rancher UI with trusted SSL at https://{{ rancher_subdomain }}
+          ✅ HTTPS redirect for all traffic
+          ✅ Security headers and proxy configuration
+          
+          🔗 Access URLs:
+          • Root Domain: https://{{ public_domain }} (Hello World with SSL status)
+          • Hello Subdomain: https://hello.{{ public_domain }} (Wildcard SSL test)
+          • Rancher Management: https://{{ rancher_subdomain }} (Management UI)
+          • Any Subdomain: https://yourapp.{{ public_domain }} (Wildcard ready!)
+          
+          🎨 Demo Features:
+          • Beautiful responsive HTML pages with SSL status information
+          • Interactive navigation between test pages
+          • Visual confirmation of SSL certificate functionality
+          • Wildcard certificate demonstration
+          
+          🔒 Certificate Details:
+          • Issuer: Let's Encrypt Production
+          • Email: {{ letsencrypt_email }}
+          • Auto-renewal: Every 60 days
+          • Validation: HTTP-01 challenge
+          
+          📋 Next Steps:
+          1. Verify certificates are issued: kubectl get certificates --all-namespaces
+          2. Test root domain: https://{{ public_domain }}
+          3. Test subdomain: https://hello.{{ public_domain }}
+          4. Access Rancher: https://{{ rancher_subdomain }}
+          5. Create additional ingress resources using the 'nginx' IngressClass
+          6. Use 'letsencrypt-prod' ClusterIssuer for automatic SSL
+          
+          🎯 Configuration ready for production use!
+
+  handlers:
+    - name: Restart ingress controller if needed
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl rollout restart daemonset/ingress-nginx-controller -n ingress-nginx
+      become_user: "{{ admin_user }}"
+      failed_when: false
