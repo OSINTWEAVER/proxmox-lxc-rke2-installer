@@ -93,50 +93,117 @@
   args:
     executable: /bin/bash
 
-- name: Check if Rancher is already installed
+- name: Check for any existing Rancher Helm release (including failed ones)
   ansible.builtin.shell: |
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    /usr/local/bin/helm list -n cattle-system | grep -q "^rancher\s"
+    /usr/local/bin/helm list -n cattle-system -a | grep "^rancher\s" || echo "No rancher release found"
   args:
     executable: /bin/bash
-  register: rancher_check
+  register: rancher_release_check
   failed_when: false
   changed_when: false
 
-- name: Check for failed Rancher installations
+- name: Comprehensive Rancher cleanup (force remove all traces)
   ansible.builtin.shell: |
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    /usr/local/bin/helm list -n cattle-system -a | grep "^rancher\s" | grep -v "deployed"
-  args:
-    executable: /bin/bash
-  register: rancher_failed_check
-  failed_when: false
-  changed_when: false
+    echo "=== Starting comprehensive Rancher cleanup ==="
 
-- name: Clean up failed Rancher installation
-  ansible.builtin.shell: |
-    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    echo "Cleaning up failed Rancher installation..."
-    /usr/local/bin/helm uninstall rancher -n cattle-system --timeout=300s || true
-    sleep 10
-    # Clean up any stuck resources
-    kubectl delete deployment -n cattle-system rancher --timeout=60s || true
-    kubectl delete service -n cattle-system rancher --timeout=60s || true
-    kubectl delete ingress -n cattle-system rancher --timeout=60s || true
-    kubectl delete configmap -n cattle-system rancher-config --timeout=60s || true
-    kubectl delete secret -n cattle-system rancher-secret --timeout=60s || true
+    # 1. Force uninstall Helm release (ignore errors)
+    echo "1. Force uninstalling Helm release..."
+    /usr/local/bin/helm uninstall rancher -n cattle-system --timeout=60s --ignore-not-found || true
     sleep 5
+
+    # 2. Clean up namespace if it exists and is stuck
+    echo "2. Checking cattle-system namespace..."
+    if kubectl get namespace cattle-system >/dev/null 2>&1; then
+      echo "   Namespace exists, cleaning up resources..."
+
+      # Delete all Rancher-related resources
+      kubectl delete deployment -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+      kubectl delete service -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+      kubectl delete ingress -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+      kubectl delete configmap -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+      kubectl delete secret -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+      kubectl delete job -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+      kubectl delete pvc -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+      kubectl delete pv -n cattle-system --all --timeout=30s --ignore-not-found=true || true
+
+      # Force delete any stuck pods
+      kubectl delete pods -n cattle-system --all --force --grace-period=0 --timeout=30s || true
+
+      sleep 10
+    else
+      echo "   Namespace cattle-system does not exist"
+    fi
+
+    # 3. Clean up any remaining cluster-scoped resources
+    echo "3. Cleaning up cluster-scoped resources..."
+    kubectl delete clusterrolebinding --all --ignore-not-found=true | grep rancher || true
+    kubectl delete clusterrole --all --ignore-not-found=true | grep rancher || true
+
+    # 4. Reset Helm release history
+    echo "4. Resetting Helm release history..."
+    /usr/local/bin/helm reset --force || true
+
+    # 5. Wait for cleanup to complete
+    echo "5. Waiting for cleanup to complete..."
+    sleep 15
+
+    echo "=== Rancher cleanup completed ==="
   args:
     executable: /bin/bash
-  register: rancher_cleanup_result
-  when: rancher_failed_check.rc == 0
+  register: comprehensive_cleanup
+  when: rancher_release_check.stdout is not search("No rancher release found")
+  failed_when: false
+
+- name: Verify cleanup was successful
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    echo "=== Verifying cleanup ==="
+
+    # Check if Helm release is gone
+    if /usr/local/bin/helm list -n cattle-system -a | grep "^rancher\s" >/dev/null 2>&1; then
+      echo "WARNING: Helm release still exists!"
+      exit 1
+    else
+      echo "✓ Helm release successfully removed"
+    fi
+
+    # Check if namespace is clean
+    if kubectl get namespace cattle-system >/dev/null 2>&1; then
+      rancher_pods=$(kubectl get pods -n cattle-system -l app=rancher --no-headers 2>/dev/null | wc -l)
+      if [ "$rancher_pods" -gt 0 ]; then
+        echo "WARNING: Rancher pods still exist in cattle-system namespace!"
+        exit 1
+      else
+        echo "✓ cattle-system namespace is clean"
+      fi
+    else
+      echo "✓ cattle-system namespace does not exist"
+    fi
+
+    echo "=== Cleanup verification completed ==="
+  args:
+    executable: /bin/bash
+  register: cleanup_verification
+  when: rancher_release_check.stdout is not search("No rancher release found")
   failed_when: false
 
 - name: Install Rancher following official documentation (compatible with current K8s version)
   ansible.builtin.shell: |
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    echo "=== Starting Rancher installation ==="
+
+    # Verify no conflicting release exists
+    if /usr/local/bin/helm list -n cattle-system -a | grep "^rancher\s" >/dev/null 2>&1; then
+      echo "ERROR: Rancher release still exists! Cleanup may have failed."
+      exit 1
+    fi
+
+    echo "Installing Rancher with Helm..."
     /usr/local/bin/helm install rancher rancher-stable/rancher \
       --namespace cattle-system \
+      --create-namespace \
       --set hostname="{{ rancher_hostname }}" \
       --set bootstrapPassword="{{ rancher_bootstrap_password }}" \
       --set replicas=1 \
@@ -149,32 +216,91 @@
       --set extraEnv[0].value="" \
       --set useBundledSystemChart=true \
       --timeout=600s \
-      --wait
+      --wait \
+      --debug
   args:
     executable: /bin/bash
   register: rancher_install_result
-  retries: 5
+  retries: 3
   delay: 30
   until: rancher_install_result.rc == 0
-  when: rancher_check.rc != 0
+  failed_when: false
 
-- name: Show Rancher installation failure details (if failed)
+- name: Show Rancher installation failure details and recovery options
   ansible.builtin.debug:
     msg: |
-      Rancher installation failed after 5 retries!
+      ❌ Rancher installation failed after retries!
       Error: {{ rancher_install_result.stderr | default('No error message') }}
       Command output: {{ rancher_install_result.stdout | default('No output') }}
-      
-      Troubleshooting steps:
-      1. Check if namespace exists: kubectl get namespace cattle-system
-      2. Check existing releases: helm list -n cattle-system
-      3. Check pod status: kubectl get pods -n cattle-system
-      4. Remove failed release: helm uninstall rancher -n cattle-system
-  when: rancher_check.rc != 0 and rancher_install_result.failed | default(false)
+
+      🔧 Recovery Options:
+      1. Manual cleanup and retry:
+         helm uninstall rancher -n cattle-system --ignore-not-found
+         kubectl delete namespace cattle-system --ignore-not-found
+         # Then re-run the playbook
+
+      2. Check cluster resources:
+         kubectl get pods -n cattle-system
+         kubectl get ingress -n cattle-system
+         helm list -n cattle-system
+
+      3. Check cert-manager status:
+         kubectl get pods -n cert-manager
+         kubectl logs -n cert-manager deployment/cert-manager
+
+      4. Force reinstall (if needed):
+         ansible-playbook -i inventories/hosts-your-cluster.ini playbooks/troubleshooting/install_rancher_only.yml
+  when: rancher_install_result.failed | default(false)
+
+- name: Verify Rancher installation success
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    echo "=== Verifying Rancher installation ==="
+
+    # Check if Helm release exists and is deployed
+    if /usr/local/bin/helm list -n cattle-system | grep "^rancher\s" | grep "deployed" >/dev/null 2>&1; then
+      echo "✓ Helm release 'rancher' is deployed"
+    else
+      echo "✗ Helm release 'rancher' is not properly deployed"
+      exit 1
+    fi
+
+    # Check if Rancher pod is running
+    rancher_pod=$(kubectl get pods -n cattle-system -l app=rancher -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "NotFound")
+    if [ "$rancher_pod" = "Running" ]; then
+      echo "✓ Rancher pod is running"
+    else
+      echo "✗ Rancher pod is not running (status: $rancher_pod)"
+      exit 1
+    fi
+
+    # Check if ingress is created
+    if kubectl get ingress -n cattle-system rancher >/dev/null 2>&1; then
+      echo "✓ Rancher ingress is created"
+    else
+      echo "✗ Rancher ingress is not created"
+      exit 1
+    fi
+
+    echo "=== Rancher installation verification completed ==="
+  args:
+    executable: /bin/bash
+  register: rancher_verification
+  when: not (rancher_install_result.failed | default(false))
+  failed_when: false
 
 - name: Upgrade Rancher if already installed with different configuration
   ansible.builtin.shell: |
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    echo "=== Upgrading existing Rancher installation ==="
+
+    # Verify the release exists and is healthy
+    if ! /usr/local/bin/helm list -n cattle-system | grep "^rancher\s" | grep "deployed" >/dev/null 2>&1; then
+      echo "ERROR: No healthy Rancher release found for upgrade!"
+      exit 1
+    fi
+
+    echo "Upgrading Rancher with Helm..."
     /usr/local/bin/helm upgrade rancher rancher-stable/rancher \
       --namespace cattle-system \
       --set hostname="{{ rancher_hostname }}" \
@@ -189,42 +315,60 @@
       --set extraEnv[0].value="" \
       --set useBundledSystemChart=true \
       --timeout=600s \
-      --wait
+      --wait \
+      --debug
   args:
     executable: /bin/bash
   register: rancher_upgrade_result
   retries: 3
   delay: 30
   until: rancher_upgrade_result.rc == 0
-  when: rancher_check.rc == 0
+  when: rancher_release_check.stdout is search("rancher")
+  failed_when: false
 
-- name: Show Rancher upgrade failure details (if failed)
+- name: Show Rancher upgrade failure details and recovery options
   ansible.builtin.debug:
     msg: |
-      Rancher upgrade failed after 3 retries!
+      ❌ Rancher upgrade failed after retries!
       Error: {{ rancher_upgrade_result.stderr | default('No error message') }}
       Command output: {{ rancher_upgrade_result.stdout | default('No output') }}
-      
-      Troubleshooting steps:
-      1. Check current release: helm get values rancher -n cattle-system
-      2. Check pod status: kubectl get pods -n cattle-system
-      3. Force upgrade: helm upgrade rancher rancher-stable/rancher -n cattle-system --force
-      4. Or uninstall and reinstall: helm uninstall rancher -n cattle-system
-  when: rancher_check.rc == 0 and rancher_upgrade_result.failed | default(false)
+
+      🔧 Recovery Options:
+      1. Check current release status:
+         helm status rancher -n cattle-system
+         helm get values rancher -n cattle-system
+
+      2. Force upgrade:
+         helm upgrade rancher rancher-stable/rancher -n cattle-system --force --debug
+
+      3. Complete reinstall (nuclear option):
+         helm uninstall rancher -n cattle-system --ignore-not-found
+         kubectl delete namespace cattle-system --ignore-not-found
+         # Then re-run the playbook
+
+      4. Check cluster health:
+         kubectl get pods -n cattle-system
+         kubectl get events -n cattle-system --sort-by=.metadata.creationTimestamp
+  when: rancher_upgrade_result.failed | default(false)
 
 - name: Display Rancher installation status
   ansible.builtin.debug:
     msg: |
-      Rancher Status:
-      {% if rancher_check.rc != 0 %}
+      🎯 Rancher Installation Status:
+      {% if rancher_release_check.stdout is not search("rancher") %}
       - Action: Fresh installation completed
-      - Status: {{ 'Success' if rancher_install_result.rc == 0 else 'Failed' }}
+      - Status: {{ '✅ Success' if not (rancher_install_result.failed | default(false)) else '❌ Failed' }}
       {% else %}
       - Action: Existing installation upgraded
-      - Status: {{ 'Success' if rancher_upgrade_result.rc == 0 else 'Failed' }}
+      - Status: {{ '✅ Success' if not (rancher_upgrade_result.failed | default(false)) else '❌ Failed' }}
       {% endif %}
       - Hostname: {{ rancher_hostname }}
       - Namespace: cattle-system
+      - Verification: {{ '✅ Passed' if not (rancher_verification.failed | default(false)) else '❌ Failed' }}
+
+      {% if rancher_install_result.failed | default(false) or rancher_upgrade_result.failed | default(false) %}
+      🚨 Installation Issues Detected - Check logs above for details
+      {% endif %}
 
 - name: Wait for Rancher deployment to be ready
   ansible.builtin.shell: |
