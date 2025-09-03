@@ -1,0 +1,13 @@
+---
+# Ansible Galaxy Requirements for Proxmox LXC RKE2 Installer
+# Install with: ansible-galaxy collection install -r requirements-collections.yml
+
+collections:
+  - name: community.general
+    version: ">=9.0.0"
+  - name: ansible.posix
+    version: ">=1.5.0"
+  - name: kubernetes.core
+    version: ">=3.0.0"
+  - name: community.crypto
+    version: ">=2.0.0"

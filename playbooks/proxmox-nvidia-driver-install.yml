@@ -16,6 +16,13 @@
           - ansible_os_family == 'Debian'
         fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
 
+    - name: Install required Ansible collections
+      ansible.builtin.shell: |
+        ansible-galaxy collection install community.general ansible.posix --force
+      register: ansible_collection_install
+      failed_when: false
+      changed_when: false
+
   tasks:
     - name: Check if nvidia-smi is already working
       ansible.builtin.shell: nvidia-smi

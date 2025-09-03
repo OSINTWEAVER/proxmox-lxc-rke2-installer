@@ -103,6 +103,35 @@
   failed_when: false
   changed_when: false
 
+- name: Check for failed Rancher installations
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    /usr/local/bin/helm list -n cattle-system -a | grep "^rancher\s" | grep -v "deployed"
+  args:
+    executable: /bin/bash
+  register: rancher_failed_check
+  failed_when: false
+  changed_when: false
+
+- name: Clean up failed Rancher installation
+  ansible.builtin.shell: |
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    echo "Cleaning up failed Rancher installation..."
+    /usr/local/bin/helm uninstall rancher -n cattle-system --timeout=300s || true
+    sleep 10
+    # Clean up any stuck resources
+    kubectl delete deployment -n cattle-system rancher --timeout=60s || true
+    kubectl delete service -n cattle-system rancher --timeout=60s || true
+    kubectl delete ingress -n cattle-system rancher --timeout=60s || true
+    kubectl delete configmap -n cattle-system rancher-config --timeout=60s || true
+    kubectl delete secret -n cattle-system rancher-secret --timeout=60s || true
+    sleep 5
+  args:
+    executable: /bin/bash
+  register: rancher_cleanup_result
+  when: rancher_failed_check.rc == 0
+  failed_when: false
+
 - name: Install Rancher following official documentation (compatible with current K8s version)
   ansible.builtin.shell: |
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml

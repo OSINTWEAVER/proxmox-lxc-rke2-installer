@@ -1,0 +1,38 @@
+---
+- name: Install Ansible collections on jumpbox or target hosts
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Ensure requirements-collections.yml exists
+      ansible.builtin.stat:
+        path: "./requirements-collections.yml"
+      register: requirements_file
+      delegate_to: localhost
+      run_once: true
+
+    - name: Install Ansible collections from requirements file
+      ansible.builtin.shell: |
+        ansible-galaxy collection install -r requirements-collections.yml --force
+      when: requirements_file.stat.exists
+      register: collection_install
+      failed_when: false
+      changed_when: collection_install.rc == 0
+
+    - name: Install essential collections manually if requirements file missing
+      ansible.builtin.shell: |
+        ansible-galaxy collection install community.general ansible.posix kubernetes.core community.crypto --force
+      when: not requirements_file.stat.exists
+      register: manual_collection_install
+      failed_when: false
+      changed_when: manual_collection_install.rc == 0
+
+    - name: Display collection installation results
+      ansible.builtin.debug:
+        msg: |
+          Ansible Collections Installation: {{ 'SUCCESS' if (collection_install.rc | default(0) == 0) or (manual_collection_install.rc | default(0) == 0) else 'FAILED' }}
+          {% if collection_install is defined and collection_install.stdout is defined %}
+          Output: {{ collection_install.stdout }}
+          {% endif %}
+          {% if manual_collection_install is defined and manual_collection_install.stdout is defined %}
+          Output: {{ manual_collection_install.stdout }}
+          {% endif %}

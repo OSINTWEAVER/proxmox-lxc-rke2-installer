@@ -266,7 +266,7 @@
       when: item.host == inventory_hostname
       ansible.builtin.shell: |
         set -e
-        pct exec {{ item.id }} -- ansible-galaxy collection install community.general
+        pct exec {{ item.id }} -- ansible-galaxy collection install community.general ansible.posix kubernetes.core community.crypto --force
       args:
         executable: /bin/bash
       register: ansible_collection_install
