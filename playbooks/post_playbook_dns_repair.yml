@@ -1,0 +1,197 @@
+---
+# Post-install repair: Fix kubelet clusterDNS mismatch causing pod DNS failures
+# - Detect CoreDNS Service IP
+# - Patch /etc/rancher/rke2/kubelet-config.yaml on all nodes
+# - Restart RKE2 services and verify CoreDNS and in-cluster DNS
+# - Restart Rancher to requeue failed system charts (fleet-crd, etc.)
+
+- name: Post-install DNS repair for RKE2 clusters
+  hosts: rke2_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    kubeconfig_path: /etc/rancher/rke2/rke2.yaml
+
+  pre_tasks:
+    - name: Select a control node to query cluster state
+      set_fact:
+        rke2_control_host: "{{ (groups['rke2_servers'] | default(groups['rke2_cluster'])) | first }}"
+      run_once: true
+
+    - name: Detect CoreDNS Service IP via label selector
+      ansible.builtin.shell: |
+        set -e
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get svc -n kube-system -l k8s-app=kube-dns -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ rke2_control_host }}"
+      register: coredns_ip_raw
+      run_once: true
+
+    - name: Fallback to rke2-coredns service name if label not present
+      ansible.builtin.shell: |
+        set -e
+        export KUBECONFIG={{ kubeconfig_path }}
+        kubectl get svc -n kube-system rke2-coredns-rke2-coredns -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      when: (coredns_ip_raw.stdout | trim) == ''
+      delegate_to: "{{ rke2_control_host }}"
+      register: coredns_ip_alt
+      run_once: true
+
+    - name: Determine correct clusterDNS value
+      set_fact:
+        correct_cluster_dns: >-
+          {{ (coredns_ip_raw.stdout | trim) if (coredns_ip_raw.stdout | trim) != ''
+             else (coredns_ip_alt.stdout | trim) if (coredns_ip_alt is defined and (coredns_ip_alt.stdout | trim) != '')
+             else (rke2_cluster_dns | default('10.43.0.10')) }}
+      run_once: true
+
+    - name: Show detected CoreDNS IP
+      debug:
+        msg: "Using CoreDNS Service IP: {{ correct_cluster_dns }}"
+      run_once: true
+
+  tasks:
+    - name: Render kubelet-config.yaml with corrected clusterDNS
+      ansible.builtin.template:
+        src: ../ansible-role-rke2/templates/kubelet-config.yaml.j2
+        dest: /etc/rancher/rke2/kubelet-config.yaml
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      vars:
+        rke2_cluster_dns: "{{ correct_cluster_dns }}"
+      notify: Restart RKE2 service
+
+    - name: Ensure kubelet reads config flag is present in RKE2 config
+      ansible.builtin.lineinfile:
+        path: /etc/rancher/rke2/config.yaml
+        regexp: '^\s*-\s*config=.*kubelet-config.yaml\s*$'
+        line: '  - "config=/etc/rancher/rke2/kubelet-config.yaml"'
+        insertafter: '^kubelet-arg:'
+      notify: Restart RKE2 service
+
+    - name: Apply pending handler restarts now
+      meta: flush_handlers
+
+    - name: Wait for RKE2 systemd service to become active
+      ansible.builtin.shell: |
+        set -e
+        SVC={{ 'rke2-server' if (inventory_hostname in (groups['rke2_servers'] | default([]))) else 'rke2-agent' }}
+        for i in $(seq 1 60); do
+          if systemctl is-active --quiet "$SVC"; then exit 0; fi
+          sleep 5
+        done
+        echo "Service $SVC did not become active in time" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: svc_active
+      changed_when: false
+
+  handlers:
+    - name: Restart RKE2 service
+      ansible.builtin.service:
+        name: "{{ 'rke2-server' if (inventory_hostname in (groups['rke2_servers'] | default([]))) else 'rke2-agent' }}"
+        state: restarted
+
+  post_tasks:
+    - name: Determine kubectl binary
+      ansible.builtin.set_fact:
+        kubectl_bin: 
+          "/var/lib/rancher/rke2/bin/kubectl"
+
+    - name: Wait for Kubernetes API to be ready
+      ansible.builtin.shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        K="{{ kubectl_bin }}"; [ -x "$K" ] || K=kubectl
+        for i in $(seq 1 90); do
+          if $K --request-timeout=5s get --raw='/readyz' >/dev/null 2>&1; then exit 0; fi
+          sleep 5
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ rke2_control_host }}"
+      run_once: true
+
+    - name: Wait for CoreDNS to be Ready
+      ansible.builtin.shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        K="{{ kubectl_bin }}"; [ -x "$K" ] || K=kubectl
+        $K -n kube-system wait --for=condition=ready pod -l k8s-app=kube-dns --timeout=300s || \
+        $K -n kube-system wait --for=condition=ready pod -l app.kubernetes.io/name=rke2-coredns --timeout=300s
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ rke2_control_host }}"
+      run_once: true
+
+    - name: In-cluster DNS smoke test (nslookup kubernetes.default)
+      ansible.builtin.shell: |
+        set -e
+        export KUBECONFIG={{ kubeconfig_path }}
+        K="{{ kubectl_bin }}"; [ -x "$K" ] || K=kubectl
+        $K -n kube-system delete pod dns-test --ignore-not-found
+        $K -n kube-system run dns-test --image=busybox:1.36 --restart=Never --command -- sh -c \
+          "nslookup -timeout=5 kubernetes.default.svc.cluster.local {{ correct_cluster_dns }} && nslookup -timeout=5 kubernetes.default" 1>/tmp/dns-test.out 2>/tmp/dns-test.err || true
+        # Print results
+        echo '--- DNS TEST STDOUT ---'; cat /tmp/dns-test.out || true
+        echo '--- DNS TEST STDERR ---'; cat /tmp/dns-test.err || true
+        # Cleanup
+        $K -n kube-system delete pod dns-test --wait=false || true
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ rke2_control_host }}"
+      register: dns_test_output
+      run_once: true
+
+    - name: Show DNS test result
+      debug:
+        var: dns_test_output.stdout
+      run_once: true
+
+    - name: Wait for all nodes to be Ready (no jq dependency)
+      ansible.builtin.shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        K="{{ kubectl_bin }}"; [ -x "$K" ] || K=kubectl
+        expected=$(( {{ (groups['rke2_servers'] | default([])) | length }} + {{ (groups['rke2_agents'] | default([])) | length }} ))
+        for i in $(seq 1 120); do
+          # Count total nodes
+          total=$($K get nodes --no-headers 2>/dev/null | wc -l)
+          # Count nodes with STATUS starting with Ready
+          ready=$($K get nodes --no-headers 2>/dev/null | awk '$2 ~ /^Ready/ {c++} END{print c+0}')
+          if [ "$total" -ge "$expected" ] && [ "$ready" -ge "$expected" ]; then exit 0; fi
+          sleep 5
+        done
+        echo "Nodes Ready: $ready / Expected: $expected" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ rke2_control_host }}"
+      run_once: true
+
+    - name: Clean up failed helm-operation pods to force Rancher retries
+      ansible.builtin.shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        K="{{ kubectl_bin }}"; [ -x "$K" ] || K=kubectl
+        $K -n cattle-system delete pod -l name=helm-operation --ignore-not-found || true
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ rke2_control_host }}"
+      run_once: true
+
+    - name: Restart Rancher deployment to requeue system charts
+      ansible.builtin.shell: |
+        export KUBECONFIG={{ kubeconfig_path }}
+        K="{{ kubectl_bin }}"; [ -x "$K" ] || K=kubectl
+        $K -n cattle-system rollout restart deploy rancher || true
+        $K -n cattle-system rollout status deploy rancher --timeout=300s || true
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ rke2_control_host }}"
+      run_once: true

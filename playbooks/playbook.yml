@@ -46,7 +46,7 @@
 
     # DNS configuration - critical for proper service discovery
     # These values come from inventory files and must match service CIDR
-    rke2_cluster_dns: 10.41.0.10
+    # rke2_cluster_dns: 10.41.0.10  # Removed to use inventory value
     rke2_cluster_domain: cluster.local
 
     # LXC container-specific RKE2 configuration
@@ -1194,5 +1194,5 @@
       vars:
         k8s_cluster: "{{ groups['rke2_cluster'] | default(groups['all']) }}"
         # DNS configuration - ensure cluster DNS matches service CIDR
-        rke2_cluster_dns: 10.41.0.10
+        # rke2_cluster_dns: 10.41.0.10  # Removed to use inventory value
         rke2_cluster_domain: cluster.local

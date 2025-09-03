@@ -1,5 +1,12 @@
 # Proxmox LXC RKE2 Installer - Quick Reference
 
+## 📋 Updates
+
+### September 2025 - DNS Resolution & Nuclear Uninstall
+- **DNS Fix**: Resolved DNS resolution failures in helm-operation pods by removing hardcoded `rke2_cluster_dns` values (10.41.0.10) from the main playbook. The playbook now respects inventory-specific DNS settings (e.g., 10.43.0.10 for Octostar).
+- **Nuclear Uninstall Playbook**: Added `playbooks/troubleshooting/rke2_nuclear_uninstall.yml` for complete RKE2 cluster destruction with 10 phases of cleanup, including service stops, process kills, data removal, and network cleanup.
+- **DNS Repair Post-Playbook**: Created `playbooks/post_playbook_dns_repair.yml` for automated DNS fixes on existing clusters with clusterDNS mismatches.
+
 > **📁 Organization**: Troubleshooting and fix playbooks are located in `playbooks/troubleshooting/`, and utility playbooks are in `playbooks/utils/` for better organization and maintenance.
 
 > **⚙️ MTU Configuration**: Network MTU is now configurable in the `proxmox-vars/*.yml` files. Set `mtu: 9000` for jumbo frames (high-speed networks) or `mtu: 1500` for standard networks.

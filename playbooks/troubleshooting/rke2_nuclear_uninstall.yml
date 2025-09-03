@@ -1,0 +1,422 @@
+---
+# RKE2 Full Nuclear Uninstall Playbook
+# WARNING: This playbook will COMPLETELY DESTROY your RKE2 cluster
+# Use only when you want to start fresh - this removes EVERYTHING
+#
+# Usage:
+# ansible-playbook -i inventories/hosts-octostar_actual.ini playbooks/troubleshooting/rke2_nuclear_uninstall.yml
+# or
+# ansible-playbook -i inventories/hosts-iris.ini playbooks/troubleshooting/rke2_nuclear_uninstall.yml
+
+- name: RKE2 Nuclear Uninstall - Complete Cluster Destruction
+  hosts: rke2_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    # Force level - set to 'extreme' for maximum destruction
+    force_level: 'extreme'
+    # Skip confirmation prompts (set to false for safety)
+    skip_confirmation: true
+
+  pre_tasks:
+    - name: Safety confirmation
+      pause:
+        prompt: |
+          ⚠️  WARNING: This will COMPLETELY DESTROY your RKE2 cluster!
+
+          This playbook will:
+          - Stop and disable all RKE2 services
+          - Kill all RKE2 and Kubernetes processes
+          - Remove ALL RKE2 data and configurations
+          - Clean up network configurations
+          - Remove kubectl, helm, k9s, and all tools
+          - Delete user configurations and kubeconfigs
+          - Remove systemd overrides and custom configurations
+
+          This is IRREVERSIBLE. Make sure you have backups if needed.
+
+          Type 'YES' to continue or 'NO' to abort:
+        echo: true
+      register: confirmation
+      when: not skip_confirmation | bool
+
+    - name: Abort if not confirmed
+      fail:
+        msg: "Uninstall aborted by user"
+      when: not skip_confirmation | bool and confirmation.user_input != 'YES'
+
+    - name: Display destruction warning
+      debug:
+        msg: |
+          🚨 STARTING RKE2 NUCLEAR UNINSTALL 🚨
+          Target: {{ inventory_hostname }}
+          Force Level: {{ force_level }}
+          This will remove EVERYTHING related to RKE2/Kubernetes
+
+  tasks:
+    # ===== PHASE 1: STOP ALL SERVICES =====
+    - name: Stop and disable RKE2 services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      with_items:
+        - rke2-server
+        - rke2-agent
+        - k3s
+        - k3s-agent
+      failed_when: false
+      ignore_errors: true
+
+    - name: Kill all RKE2 and Kubernetes processes (brute force)
+      shell: |
+        # Kill all RKE2 processes
+        pkill -9 -f rke2 || true
+        pkill -9 -f k3s || true
+        pkill -9 -f containerd || true
+        pkill -9 -f kubelet || true
+        pkill -9 -f kube-proxy || true
+        pkill -9 -f kube-apiserver || true
+        pkill -9 -f kube-controller-manager || true
+        pkill -9 -f kube-scheduler || true
+        pkill -9 -f etcd || true
+        pkill -9 -f coredns || true
+        pkill -9 -f flannel || true
+
+        # Kill any remaining container processes
+        pkill -9 -f docker || true
+        pkill -9 -f podman || true
+        pkill -9 -f cri-o || true
+
+        # Kill any helm operations
+        pkill -9 -f helm || true
+        pkill -9 -f tiller || true
+
+        # Wait for processes to die
+        sleep 5
+
+        # Double-check and kill any survivors
+        ps aux | grep -E "(rke2|k3s|kube|etcd|containerd)" | grep -v grep | awk '{print $2}' | xargs -r kill -9 || true
+
+        sleep 2
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 2: REMOVE ALL DATA DIRECTORIES =====
+    - name: Remove RKE2 data directories (nuclear option)
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /var/lib/rancher
+        - /var/lib/kubelet
+        - /etc/rancher
+        - /run/k3s
+        - /run/rke2
+        - /opt/rke2
+        - /usr/local/bin/rke2
+        - /usr/local/bin/k3s
+        - /var/lib/cni
+        - /etc/cni
+        - /opt/cni
+        - /var/log/pods
+        - /var/log/containers
+      failed_when: false
+      ignore_errors: true
+
+    - name: Remove Kubernetes-related directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /var/lib/kubernetes
+        - /etc/kubernetes
+        - /usr/libexec/kubernetes
+        - /var/run/kubernetes
+        - /tmp/k8s-*
+        - /tmp/kube-*
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 3: CLEAN UP NETWORK CONFIGURATIONS =====
+    - name: Remove CNI network configurations
+      shell: |
+        # Remove all CNI network files
+        rm -rf /etc/cni/net.d/* || true
+        rm -rf /var/lib/cni/* || true
+        rm -rf /opt/cni/bin/* || true
+
+        # Remove flannel interfaces
+        ip link delete flannel.1 2>/dev/null || true
+        ip link delete cni0 2>/dev/null || true
+
+        # Remove all cni- and flannel- related interfaces
+        for iface in $(ip link show | grep -E "(cni|flannel|cbr0|vxlan)" | awk -F: '{print $2}' | tr -d ' '); do
+          ip link delete "$iface" 2>/dev/null || true
+        done
+
+        # Clean up iptables rules
+        iptables -t nat -F || true
+        iptables -t nat -X || true
+        iptables -F || true
+        iptables -X || true
+
+        # Clean up ipvs rules
+        ipvsadm -C || true
+      failed_when: false
+      ignore_errors: true
+
+    - name: Remove network namespaces
+      shell: |
+        # Remove all network namespaces
+        for ns in $(ip netns list 2>/dev/null | awk '{print $1}'); do
+          ip netns delete "$ns" 2>/dev/null || true
+        done
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 4: REMOVE SYSTEMD CONFIGURATIONS =====
+    - name: Remove systemd service files and overrides
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /etc/systemd/system/rke2-server.service
+        - /etc/systemd/system/rke2-agent.service
+        - /etc/systemd/system/k3s.service
+        - /etc/systemd/system/k3s-agent.service
+        - /etc/systemd/system/rke2-server.service.d
+        - /etc/systemd/system/rke2-agent.service.d
+        - /etc/systemd/system/k3s.service.d
+        - /etc/systemd/system/k3s-agent.service.d
+        - /etc/systemd/system/create-kmsg.service
+        - /etc/systemd/system/create-kmsg.service.d
+        - /etc/systemd/networkd.conf.d/rke2-network.conf
+        - /etc/systemd/system.conf.d/lxc-overrides.conf
+      failed_when: false
+      ignore_errors: true
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: true
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 5: REMOVE KUBERNETES TOOLS =====
+    - name: Remove kubectl, helm, and k9s
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /usr/local/bin/kubectl
+        - /usr/local/bin/helm
+        - /usr/local/bin/k9s
+        - /usr/local/bin/kubectl-rke2
+        - /usr/local/bin/helm-rke2
+        - /usr/local/bin/k9s-rke2
+      failed_when: false
+      ignore_errors: true
+
+    - name: Remove helm directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /root/.config/helm
+        - /root/.cache/helm
+        - /usr/local/bin/helm
+        - /var/lib/helm
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 6: CLEAN UP USER CONFIGURATIONS =====
+    - name: Remove user kubeconfig and configurations
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /root/.kube
+        - /root/.config/k9s
+        - /home/{{ cluster_admin_user | default('adm4n') }}/.kube
+        - /home/{{ cluster_admin_user | default('adm4n') }}/.config/k9s
+      failed_when: false
+      ignore_errors: true
+
+    - name: Remove kubectl/helm/k9s aliases from user bashrc
+      lineinfile:
+        path: "/home/{{ cluster_admin_user | default('adm4n') }}/.bashrc"
+        regexp: "{{ item }}"
+        state: absent
+      with_items:
+        - "# Kubernetes tools aliases"
+        - "alias kubectl="
+        - "alias helm="
+        - "alias k9s="
+        - "alias k="
+        - "export KUBECONFIG="
+      failed_when: false
+      ignore_errors: true
+
+    - name: Remove KUBECONFIG from user profile
+      lineinfile:
+        path: "/home/{{ cluster_admin_user | default('adm4n') }}/.profile"
+        regexp: "export KUBECONFIG="
+        state: absent
+      failed_when: false
+      ignore_errors: true
+
+    - name: Remove KUBECONFIG from root bashrc and profile
+      lineinfile:
+        path: "{{ item.path }}"
+        regexp: "{{ item.regexp }}"
+        state: absent
+      with_items:
+        - { path: '/root/.bashrc', regexp: 'export KUBECONFIG=' }
+        - { path: '/root/.bashrc', regexp: 'PATH=.*rke2.*bin' }
+        - { path: '/root/.profile', regexp: 'export KUBECONFIG=' }
+        - { path: '/etc/environment', regexp: 'KUBECONFIG=' }
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 7: REMOVE PACKAGES =====
+    - name: Remove RKE2 and Kubernetes packages
+      apt:
+        name: "{{ item }}"
+        state: absent
+        purge: true
+        autoremove: true
+        force: true
+      with_items:
+        - rke2-server
+        - rke2-agent
+        - k3s
+        - k3s-agent
+        - kubectl
+        - kubelet
+        - kubeadm
+        - kubernetes-cni
+        - containerd
+        - docker.io
+        - docker-ce
+        - podman
+        - cri-o
+      failed_when: false
+      ignore_errors: true
+
+    - name: Remove helm packages
+      shell: |
+        # Remove helm if installed via apt
+        apt remove --purge -y helm kubernetes-helm || true
+        apt autoremove -y || true
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 8: CLEAN UP REMAINING FILES =====
+    - name: Remove any remaining RKE2/Kubernetes files
+      shell: |
+        # Find and remove any remaining files
+        find /usr/local/bin -name "*rke2*" -delete 2>/dev/null || true
+        find /usr/local/bin -name "*k3s*" -delete 2>/dev/null || true
+        find /usr/local/bin -name "*kube*" -delete 2>/dev/null || true
+        find /usr/local/bin -name "*helm*" -delete 2>/dev/null || true
+        find /usr/local/bin -name "*k9s*" -delete 2>/dev/null || true
+
+        # Remove any remaining directories
+        rm -rf /usr/local/rke2* 2>/dev/null || true
+        rm -rf /usr/local/k3s* 2>/dev/null || true
+        rm -rf /usr/local/kube* 2>/dev/null || true
+
+        # Clean up any remaining symlinks
+        find /usr/local/bin -type l -name "*rke2*" -delete 2>/dev/null || true
+        find /usr/local/bin -type l -name "*k3s*" -delete 2>/dev/null || true
+        find /usr/local/bin -type l -name "*kube*" -delete 2>/dev/null || true
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 9: EXTREME FORCE CLEANUP (if force_level == 'extreme') =====
+    - name: Extreme force cleanup (optional)
+      shell: |
+        # Remove any files with kubernetes/rke2 in the name anywhere
+        find / -type f -name "*rke2*" -delete 2>/dev/null || true
+        find / -type f -name "*k3s*" -delete 2>/dev/null || true
+        find / -type f -name "*kube*" -delete 2>/dev/null || true
+        find / -type d -name "*rke2*" -exec rm -rf {} + 2>/dev/null || true
+        find / -type d -name "*k3s*" -exec rm -rf {} + 2>/dev/null || true
+        find / -type d -name "*kube*" -exec rm -rf {} + 2>/dev/null || true
+
+        # Clean up any remaining processes one more time
+        ps aux | grep -E "(rke2|k3s|kube|etcd|containerd|flannel|coredns)" | grep -v grep | awk '{print $2}' | xargs -r kill -9 || true
+
+        # Force cleanup of any mounted volumes
+        umount -f /var/lib/kubelet 2>/dev/null || true
+        umount -f /mnt/data 2>/dev/null || true
+      when: force_level == 'extreme'
+      failed_when: false
+      ignore_errors: true
+
+    # ===== PHASE 10: FINAL VERIFICATION =====
+    - name: Verify complete removal
+      shell: |
+        echo "=== VERIFICATION: Checking for remaining RKE2/Kubernetes components ==="
+
+        # Check for running processes
+        echo "Running processes:"
+        ps aux | grep -E "(rke2|k3s|kube|etcd|containerd)" | grep -v grep || echo "✓ No processes found"
+
+        # Check for services
+        echo -e "\nSystemd services:"
+        systemctl list-units --all | grep -E "(rke2|k3s)" || echo "✓ No services found"
+
+        # Check for directories
+        echo -e "\nKey directories:"
+        ls -la /var/lib/rancher 2>/dev/null || echo "✓ /var/lib/rancher removed"
+        ls -la /etc/rancher 2>/dev/null || echo "✓ /etc/rancher removed"
+        ls -la /var/lib/kubelet 2>/dev/null || echo "✓ /var/lib/kubelet removed"
+
+        # Check for tools
+        echo -e "\nTools:"
+        which kubectl 2>/dev/null || echo "✓ kubectl removed"
+        which helm 2>/dev/null || echo "✓ helm removed"
+        which k9s 2>/dev/null || echo "✓ k9s removed"
+
+        echo -e "\n=== CLEANUP COMPLETE ==="
+        echo "RKE2 cluster has been completely destroyed."
+        echo "You can now reinstall from scratch."
+      register: verification
+      failed_when: false
+
+    - name: Display verification results
+      debug:
+        msg: "{{ verification.stdout_lines }}"
+      when: verification.stdout_lines is defined
+
+    - name: Final status message
+      debug:
+        msg: |
+          🎯 RKE2 NUCLEAR UNINSTALL COMPLETE 🎯
+
+          Node: {{ inventory_hostname }}
+          Status: ✅ Completely destroyed
+
+          What was removed:
+          - All RKE2/Kubernetes services and processes
+          - All data directories (/var/lib/rancher, /etc/rancher, etc.)
+          - All network configurations and CNI setups
+          - All systemd configurations and overrides
+          - All tools (kubectl, helm, k9s)
+          - All user configurations and kubeconfigs
+          - All packages and binaries
+
+          You can now run a fresh installation without any conflicts.
+
+  post_tasks:
+    - name: Cluster-wide verification (run once)
+      shell: |
+        echo "=== CLUSTER-WIDE VERIFICATION ==="
+        echo "All nodes should now be clean of RKE2/Kubernetes components."
+        echo "Ready for fresh installation."
+      delegate_to: "{{ groups['rke2_servers'][0] }}"
+      run_once: true
+      failed_when: false
