@@ -154,7 +154,23 @@ foreach ($entry in $HOSTS) {
     if (Test-Path $knownHostsPath) {
         Write-Log "Removing existing host key entries for $targetHost"
         if (Get-Command ssh-keygen -ErrorAction SilentlyContinue) {
-            try { & ssh-keygen -R $targetHost 2>$null } catch {}
+            try { 
+                # Remove by hostname
+                & ssh-keygen -R $targetHost
+                # Also try removing by IP if it's an IP address
+                if ($targetHost -match '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') {
+                    & ssh-keygen -R $targetHost
+                }
+                # Force manual cleanup if ssh-keygen didn't work properly
+                $tempFile = "$knownHostsPath.tmp"
+                if (Test-Path $knownHostsPath) {
+                    Get-Content $knownHostsPath | Where-Object { $_ -notmatch "^$targetHost\s|^$targetHost," -and $_ -notmatch "\s$targetHost\s|\s$targetHost," } | Set-Content $tempFile
+                    Move-Item $tempFile $knownHostsPath -Force
+                    Write-Log "Manual cleanup of known_hosts completed for $targetHost"
+                }
+            } catch {
+                Write-Log "Warning: Could not remove existing host key for $targetHost - $_"
+            }
         }
     }
     
