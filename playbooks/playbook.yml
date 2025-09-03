@@ -44,6 +44,11 @@
     # Use Flannel for LXC containers instead of Cilium
     rke2_cni: flannel
 
+    # DNS configuration - critical for proper service discovery
+    # These values come from inventory files and must match service CIDR
+    rke2_cluster_dns: "{{ rke2_cluster_dns | default('10.43.0.10') }}"
+    rke2_cluster_domain: "{{ rke2_cluster_domain | default('cluster.local') }}"
+
     # LXC container-specific RKE2 configuration
     rke2_server_node_labels:
       - "node.kubernetes.io/instance-type=control-plane"
@@ -1188,3 +1193,6 @@
     - role: ../ansible-role-rke2
       vars:
         k8s_cluster: "{{ groups['rke2_cluster'] | default(groups['all']) }}"
+        # DNS configuration - ensure cluster DNS matches service CIDR
+        rke2_cluster_dns: "{{ rke2_cluster_dns | default('10.43.0.10') }}"
+        rke2_cluster_domain: "{{ rke2_cluster_domain | default('cluster.local') }}"

@@ -1,0 +1,272 @@
+---
+- name: Configure production domain with Let's Encrypt SSL certificates
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+  vars:
+    admin_user: "{{ cluster_admin_user | default('adm4n') }}"
+    public_domain: "{{ domain | default('example.com') }}"
+    rancher_subdomain: "rancher.{{ public_domain }}"
+    letsencrypt_email: "admin@{{ public_domain }}"
+    letsencrypt_server: "https://acme-v02.api.letsencrypt.org/directory"
+
+  tasks:
+    - name: Display domain configuration
+      ansible.builtin.debug:
+        msg: |
+          Domain SSL Configuration
+          =======================
+          Domain: {{ public_domain }}
+          Rancher URL: https://{{ rancher_subdomain }}
+          Email: {{ letsencrypt_email }}
+          
+          Ensure DNS is configured:
+          - {{ public_domain }} -> {{ ansible_default_ipv4.address }}
+          - *.{{ public_domain }} -> {{ ansible_default_ipv4.address }}
+          - Ports 80/443 accessible from internet
+
+    - name: Wait for DNS confirmation
+      ansible.builtin.pause:
+        prompt: "Verify DNS configuration above, then press ENTER to continue"
+
+    # Install cert-manager
+    - name: Check if cert-manager exists
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl get namespace cert-manager 2>/dev/null || echo "NOT_FOUND"
+      become_user: "{{ admin_user }}"
+      register: certmanager_check
+
+    - name: Install cert-manager
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /usr/local/bin/helm repo add jetstack https://charts.jetstack.io || true
+        /usr/local/bin/helm repo update
+        /var/lib/rancher/rke2/bin/kubectl create namespace cert-manager --dry-run=client -o yaml | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        /usr/local/bin/helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --set installCRDs=true \
+          --set prometheus.enabled=false \
+          --wait --timeout=600s
+      become_user: "{{ admin_user }}"
+      when: "'NOT_FOUND' in certmanager_check.stdout"
+
+    - name: Wait for cert-manager ready
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl wait --for=condition=available --timeout=300s deployment/cert-manager -n cert-manager
+        /var/lib/rancher/rke2/bin/kubectl wait --for=condition=available --timeout=300s deployment/cert-manager-webhook -n cert-manager
+      become_user: "{{ admin_user }}"
+
+    # Create ClusterIssuers
+    - name: Create Let's Encrypt ClusterIssuer
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat <<EOF | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: ClusterIssuer
+        metadata:
+          name: letsencrypt-prod
+        spec:
+          acme:
+            server: {{ letsencrypt_server }}
+            email: {{ letsencrypt_email }}
+            privateKeySecretRef:
+              name: letsencrypt-prod-key
+            solvers:
+            - http01:
+                ingress:
+                  class: nginx
+        EOF
+      become_user: "{{ admin_user }}"
+
+    # Create wildcard certificate
+    - name: Create wildcard certificate
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat <<EOF | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: wildcard-{{ public_domain | replace('.', '-') }}
+          namespace: default
+        spec:
+          secretName: wildcard-{{ public_domain | replace('.', '-') }}-tls
+          issuerRef:
+            name: letsencrypt-prod
+            kind: ClusterIssuer
+          dnsNames:
+          - "{{ public_domain }}"
+          - "*.{{ public_domain }}"
+        EOF
+      become_user: "{{ admin_user }}"
+
+    # Configure Rancher SSL
+    - name: Create cattle-system namespace
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        /var/lib/rancher/rke2/bin/kubectl create namespace cattle-system --dry-run=client -o yaml | /var/lib/rancher/rke2/bin/kubectl apply -f -
+      become_user: "{{ admin_user }}"
+
+    - name: Create Rancher SSL certificate
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat <<EOF | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: rancher-ssl
+          namespace: cattle-system
+        spec:
+          secretName: tls-rancher-ingress
+          issuerRef:
+            name: letsencrypt-prod
+            kind: ClusterIssuer
+          dnsNames:
+          - "{{ rancher_subdomain }}"
+        EOF
+      become_user: "{{ admin_user }}"
+
+    - name: Create Rancher ingress with SSL
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat <<EOF | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: rancher
+          namespace: cattle-system
+          annotations:
+            cert-manager.io/cluster-issuer: "letsencrypt-prod"
+            nginx.ingress.kubernetes.io/ssl-redirect: "true"
+            nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+        spec:
+          ingressClassName: nginx
+          tls:
+          - hosts:
+            - {{ rancher_subdomain }}
+            secretName: tls-rancher-ingress
+          rules:
+          - host: {{ rancher_subdomain }}
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: rancher
+                    port:
+                      number: 80
+        EOF
+      become_user: "{{ admin_user }}"
+
+    # Simple test application
+    - name: Create simple test application
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        cat <<EOF | /var/lib/rancher/rke2/bin/kubectl apply -f -
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: domain-test-html
+          namespace: default
+        data:
+          index.html: |
+            <!DOCTYPE html>
+            <html>
+            <head><title>{{ public_domain }} - SSL Test</title></head>
+            <body>
+              <h1>SSL Configuration Success</h1>
+              <p>Domain: {{ public_domain }}</p>
+              <p>SSL Certificate: Active</p>
+              <p><a href="https://{{ rancher_subdomain }}">Rancher UI</a></p>
+            </body>
+            </html>
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: domain-test
+          namespace: default
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: domain-test
+          template:
+            metadata:
+              labels:
+                app: domain-test
+            spec:
+              containers:
+              - name: nginx
+                image: nginx:alpine
+                ports:
+                - containerPort: 80
+                volumeMounts:
+                - name: html
+                  mountPath: /usr/share/nginx/html
+              volumes:
+              - name: html
+                configMap:
+                  name: domain-test-html
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: domain-test
+          namespace: default
+        spec:
+          selector:
+            app: domain-test
+          ports:
+          - port: 80
+            targetPort: 80
+        ---
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: domain-test
+          namespace: default
+          annotations:
+            cert-manager.io/cluster-issuer: "letsencrypt-prod"
+            nginx.ingress.kubernetes.io/ssl-redirect: "true"
+        spec:
+          ingressClassName: nginx
+          tls:
+          - hosts:
+            - {{ public_domain }}
+            secretName: {{ public_domain | replace('.', '-') }}-tls
+          rules:
+          - host: {{ public_domain }}
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: domain-test
+                    port:
+                      number: 80
+        EOF
+      become_user: "{{ admin_user }}"
+
+    # Status check
+    - name: Check certificate status
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        echo "Certificate Status:"
+        /var/lib/rancher/rke2/bin/kubectl get certificates --all-namespaces
+        echo
+        echo "Ingress Resources:"
+        /var/lib/rancher/rke2/bin/kubectl get ingress --all-namespaces
+        echo
+        echo "Test URLs:"
+        echo "- https://{{ public_domain }}"
+        echo "- https://{{ rancher_subdomain }}"
+      become_user: "{{ admin_user }}"
+      register: ssl_status
+
+    - name: Display results
+      ansible.builtin.debug:
+        var: ssl_status.stdout_lines

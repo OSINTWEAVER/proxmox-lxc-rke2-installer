@@ -261,7 +261,114 @@
         set -e
         # ensure package list is fresh
         pct exec {{ item.id }} -- apt update
-        pct exec {{ item.id }} -- apt install -y build-essential curl vim gnupg lsb-release unzip sudo ca-certificates software-properties-common p7zip-full git python3 python3-pip python3-venv ansible sshpass rsync ansible-core
+        pct exec {{ item.id }} -- apt install -y wireguard iptables socat unzip jq \
+          python3 python3-venv python3-pip \
+          build-essential curl ca-certificates gnupg \
+          openssl openjdk-21-jdk git sshpass p7zip-full \
+          vim lsb-release sudo software-properties-common rsync
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install Ansible from PPA in containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        set -e
+        pct exec {{ item.id }} -- apt install -y software-properties-common
+        pct exec {{ item.id }} -- add-apt-repository --yes --update ppa:ansible/ansible
+        pct exec {{ item.id }} -- apt install -y ansible-core ansible-lint python3-paramiko python3-jmespath python3-netaddr sshpass
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install Ansible community collections in containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        set -e
+        pct exec {{ item.id }} -- ansible-galaxy collection install community.general
+      args:
+        executable: /bin/bash
+      register: ansible_collection_install
+      failed_when: false  # Don't fail if already installed
+      loop: "{{ proxmox_cluster.containers }}"
+
+    # ===== SYSTEM CONFIGURATION AND LOCALIZATION =====
+
+    - name: Configure UTF-8 locale and timezone in containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        set -e
+        # Generate and set UTF-8 locale
+        pct exec {{ item.id }} -- locale-gen en_US.UTF-8
+        pct exec {{ item.id }} -- update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+        # Set timezone to UTC
+        pct exec {{ item.id }} -- timedatectl set-timezone UTC
+        echo "Locale and timezone configured for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Disable Ubuntu telemetry and bloatware in containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        set -e
+        # Disable Ubuntu Pro ads and telemetry
+        pct exec {{ item.id }} -- systemctl disable ubuntu-advantage || true
+        pct exec {{ item.id }} -- systemctl stop ubuntu-advantage || true
+        pct exec {{ item.id }} -- apt remove -y ubuntu-advantage-tools || true
+        # Disable crash reporting
+        pct exec {{ item.id }} -- systemctl disable apport || true
+        pct exec {{ item.id }} -- systemctl stop apport || true
+        # Disable popularity contest
+        pct exec {{ item.id }} -- apt remove -y popularity-contest || true
+        # Disable motd ads
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/10-help-text || true
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/80-esm || true
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/95-hwe-eol || true
+        echo "Telemetry and bloatware disabled for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      register: disable_telemetry_result
+      failed_when: false  # Don't fail if packages don't exist
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Configure automatic security updates in containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        set -e
+        # Install unattended-upgrades
+        pct exec {{ item.id }} -- apt install -y unattended-upgrades apt-listchanges
+        # Configure automatic security updates
+        pct exec {{ item.id }} -- bash -c 'echo "APT::Periodic::Update-Package-Lists \"1\";" > /etc/apt/apt.conf.d/20auto-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "APT::Periodic::Download-Upgradeable-Packages \"1\";" >> /etc/apt/apt.conf.d/20auto-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "APT::Periodic::AutocleanInterval \"7\";" >> /etc/apt/apt.conf.d/20auto-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "APT::Periodic::Unattended-Upgrade \"1\";" >> /etc/apt/apt.conf.d/20auto-upgrades'
+        # Configure to only install security updates automatically
+        pct exec {{ item.id }} -- bash -c 'echo "Unattended-Upgrade::Allowed-Origins {" > /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "    \"\${distro_id}:\${distro_codename}-security\";" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "    \"\${distro_id} ESMApps:\${distro_codename}-apps-security\";" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "    \"\${distro_id} ESM:\${distro_codename}-infra-security\";" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "};" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "Unattended-Upgrade::AutoFixInterruptedDpkg \"true\";" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "Unattended-Upgrade::MinimalSteps \"true\";" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "Unattended-Upgrade::Remove-Unused-Dependencies \"true\";" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        pct exec {{ item.id }} -- bash -c 'echo "Unattended-Upgrade::Automatic-Reboot \"false\";" >> /etc/apt/apt.conf.d/50unattended-upgrades'
+        echo "Automatic security updates configured for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Perform initial system update and upgrade in containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        set -e
+        # Update package lists and upgrade all packages
+        pct exec {{ item.id }} -- apt update
+        pct exec {{ item.id }} -- apt upgrade -y
+        # Clean up package cache
+        pct exec {{ item.id }} -- apt autoremove -y
+        pct exec {{ item.id }} -- apt autoclean
+        echo "System updated and cleaned for container {{ item.id }}"
       args:
         executable: /bin/bash
       loop: "{{ proxmox_cluster.containers }}"
@@ -467,19 +574,18 @@
         executable: /bin/bash
       loop: "{{ proxmox_cluster.containers }}"
 
-    - name: Push NVIDIA driver into GPU containers (if defined)
+    - name: Download NVIDIA driver into GPU containers (if defined)
       when: item.host == inventory_hostname and (item.gpu | default(false))
       vars:
-        host_path: "{{ item.nvidia_driver_host_path | default(proxmox_cluster.nvidia.driver_host_path | default('')) }}"
-        dest_dir: "{{ item.nvidia_driver_dest_path | default(proxmox_cluster.nvidia.driver_dest_path | default('/root')) }}"
+        driver_version: "{{ nvidia_driver_version | default('580.82.07') }}"
+        driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ driver_version }}/NVIDIA-Linux-x86_64-{{ driver_version }}.run"
+        driver_filename: "NVIDIA-Linux-x86_64-{{ driver_version }}.run"
+        dest_dir: "{{ item.nvidia_driver_dest_path | default('/root') }}"
       ansible.builtin.shell: |
-        if [ "{{ host_path | length }}" -eq 0 ]; then
-          echo "No NVIDIA driver_host_path configured; skipping push for container {{ item.id }}"
-        else
-          driver_filename=$(basename "{{ host_path }}")
-          pct push {{ item.id }} "{{ host_path }}" "{{ dest_dir }}/${driver_filename}"
-          echo "Pushed {{ host_path }} to container {{ item.id }} at {{ dest_dir }}/${driver_filename}"
-        fi
+        echo "Downloading NVIDIA driver {{ driver_version }} for container {{ item.id }}"
+        pct exec {{ item.id }} -- wget -O "{{ dest_dir }}/{{ driver_filename }}" "{{ driver_url }}"
+        pct exec {{ item.id }} -- chmod +x "{{ dest_dir }}/{{ driver_filename }}"
+        echo "Downloaded and made executable: {{ dest_dir }}/{{ driver_filename }} in container {{ item.id }}"
       args:
         executable: /bin/bash
       loop: "{{ proxmox_cluster.containers }}"
@@ -488,7 +594,7 @@
       when: item.host == inventory_hostname and (item.gpu | default(false))
       ansible.builtin.shell: |
         pct exec {{ item.id }} -- apt update
-        pct exec {{ item.id }} -- apt install -y build-essential dkms linux-headers-generic
+        pct exec {{ item.id }} -- apt install -y build-essential dkms linux-headers-generic wget
         echo "NVIDIA driver dependencies installed in container {{ item.id }}"
       args:
         executable: /bin/bash
@@ -497,18 +603,24 @@
     - name: Install NVIDIA driver in GPU containers
       when: item.host == inventory_hostname and (item.gpu | default(false))
       vars:
-        driver_version: "{{ item.nvidia_driver_version | default(proxmox_cluster.nvidia.driver_version | default('575.64.05')) }}"
-        dest_dir: "{{ item.nvidia_driver_dest_path | default(proxmox_cluster.nvidia.driver_dest_path | default('/root')) }}"
+        driver_version: "{{ nvidia_driver_version | default('580.82.07') }}"
+        driver_filename: "NVIDIA-Linux-x86_64-{{ driver_version }}.run"
+        dest_dir: "{{ item.nvidia_driver_dest_path | default('/root') }}"
       ansible.builtin.shell: |
-        driver_file="{{ dest_dir }}/NVIDIA-Linux-x86_64-{{ driver_version }}.run"
+        # Remove existing NVIDIA packages
+        pct exec {{ item.id }} -- apt-get remove --purge '^nvidia-.*' libnvidia-* || true
+        pct exec {{ item.id }} -- apt-get autoremove --purge -y || true
+        
+        # Install NVIDIA driver for LXC containers
+        driver_file="{{ dest_dir }}/{{ driver_filename }}"
         if pct exec {{ item.id }} -- test -f "$driver_file"; then
-          echo "Installing NVIDIA driver in container {{ item.id }}"
-          pct exec {{ item.id }} -- chmod +x "$driver_file"
-          pct exec {{ item.id }} -- bash -c "$driver_file --dkms --no-questions --ui=none --no-kernel-module --no-drm --install-libglvnd"
+          echo "Installing NVIDIA driver {{ driver_version }} in container {{ item.id }}"
+          # Use container-specific flags: no kernel module, no DRM, install libglvnd
+          pct exec {{ item.id }} -- bash -c "cd {{ dest_dir }} && ./{{ driver_filename }} --dkms --no-questions --ui=none --no-kernel-module --no-drm --install-libglvnd"
           pct exec {{ item.id }} -- ldconfig
-          echo "NVIDIA driver installed in container {{ item.id }}"
+          echo "NVIDIA driver installation completed for container {{ item.id }}"
         else
-          echo "NVIDIA driver installer not found in container {{ item.id }} at $driver_file"
+          echo "ERROR: NVIDIA driver file not found: $driver_file in container {{ item.id }}"
           exit 1
         fi
       args:

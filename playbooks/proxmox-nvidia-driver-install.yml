@@ -1,0 +1,180 @@
+---
+- name: Install/Update NVIDIA drivers on Proxmox hosts
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    nvidia_driver_version: "580.82.07"
+    nvidia_driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+    nvidia_driver_filename: "NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+    reboot_timeout: 300
+
+  pre_tasks:
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+  tasks:
+    - name: Check if nvidia-smi is already working
+      ansible.builtin.shell: nvidia-smi
+      register: nvidia_smi_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display current NVIDIA status
+      ansible.builtin.debug:
+        msg: "NVIDIA Driver Status: {{ 'Working' if nvidia_smi_check.rc == 0 else 'Not Working/Not Installed' }}"
+
+    - name: Check if nouveau blacklist exists
+      ansible.builtin.stat:
+        path: /etc/modprobe.d/blacklist-nouveau.conf
+      register: nouveau_blacklist_check
+
+    - name: Create nouveau blacklist configuration
+      when: not nouveau_blacklist_check.stat.exists
+      ansible.builtin.blockinfile:
+        path: /etc/modprobe.d/blacklist-nouveau.conf
+        create: true
+        block: |
+          blacklist nouveau
+          options nouveau modeset=0
+        marker: "# {mark} NVIDIA DRIVER INSTALLER"
+      register: nouveau_blacklist_created
+
+    - name: Update initramfs if nouveau blacklist was created
+      when: nouveau_blacklist_created is changed
+      ansible.builtin.shell: update-initramfs -u -k all
+      register: initramfs_update
+
+    - name: Reboot after nouveau blacklist (first reboot)
+      when: nouveau_blacklist_created is changed
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+        connect_timeout: 30
+        test_command: uptime
+      register: first_reboot
+
+    - name: Wait for system to be fully ready after first reboot
+      when: first_reboot is changed
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: "{{ reboot_timeout }}"
+
+    - name: Install required packages for NVIDIA driver compilation
+      ansible.builtin.apt:
+        name:
+          - build-essential
+          - dkms
+          - "pve-headers-{{ ansible_kernel }}"
+          - wget
+        state: present
+        update_cache: true
+
+    - name: Download NVIDIA driver
+      ansible.builtin.get_url:
+        url: "{{ nvidia_driver_url }}"
+        dest: "/tmp/{{ nvidia_driver_filename }}"
+        mode: '0755'
+        timeout: 300
+      register: driver_download
+
+    - name: Remove existing NVIDIA packages (cleanup)
+      ansible.builtin.shell: |
+        apt-get remove --purge '^nvidia-.*' libnvidia-* || true
+        apt-get autoremove --purge -y || true
+      register: nvidia_cleanup
+      changed_when: nvidia_cleanup.rc == 0
+
+    - name: Make NVIDIA driver executable
+      ansible.builtin.file:
+        path: "/tmp/{{ nvidia_driver_filename }}"
+        mode: '0755'
+
+    - name: Install NVIDIA driver
+      ansible.builtin.shell: |
+        cd /tmp
+        ./{{ nvidia_driver_filename }} --dkms --no-questions --ui=none --disable-nouveau
+      register: nvidia_install
+      failed_when: nvidia_install.rc not in [0, 1]  # Sometimes returns 1 but still succeeds
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Display NVIDIA installation output
+      ansible.builtin.debug:
+        msg: "NVIDIA Installation Output: {{ nvidia_install.stdout }}"
+      when: nvidia_install.stdout is defined
+
+    - name: Display NVIDIA installation errors (if any)
+      ansible.builtin.debug:
+        msg: "NVIDIA Installation Errors: {{ nvidia_install.stderr }}"
+      when: nvidia_install.stderr is defined and nvidia_install.stderr != ""
+
+    - name: Reboot after NVIDIA driver installation (second reboot)
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+        connect_timeout: 30
+        test_command: uptime
+      register: second_reboot
+
+    - name: Wait for system to be fully ready after NVIDIA installation
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: "{{ reboot_timeout }}"
+
+    - name: Test NVIDIA driver installation
+      ansible.builtin.shell: nvidia-smi
+      register: nvidia_test
+      failed_when: false
+      changed_when: false
+
+    - name: Display NVIDIA test results
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA Driver Test: {{ 'SUCCESS' if nvidia_test.rc == 0 else 'FAILED' }}
+          {% if nvidia_test.rc == 0 %}
+          NVIDIA-SMI Output:
+          {{ nvidia_test.stdout }}
+          {% else %}
+          Error Output:
+          {{ nvidia_test.stderr | default('No error output') }}
+          {% endif %}
+
+    - name: Verify NVIDIA kernel modules are loaded
+      ansible.builtin.shell: lsmod | grep nvidia
+      register: nvidia_modules
+      failed_when: false
+      changed_when: false
+
+    - name: Display loaded NVIDIA modules
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA Kernel Modules: {{ 'Loaded' if nvidia_modules.rc == 0 else 'Not Loaded' }}
+          {% if nvidia_modules.rc == 0 %}
+          Loaded Modules:
+          {{ nvidia_modules.stdout }}
+          {% endif %}
+
+    - name: Clean up downloaded driver file
+      ansible.builtin.file:
+        path: "/tmp/{{ nvidia_driver_filename }}"
+        state: absent
+
+    - name: Final installation summary
+      ansible.builtin.debug:
+        msg: |
+          ====== NVIDIA Driver Installation Summary ======
+          Host: {{ inventory_hostname }}
+          Driver Version: {{ nvidia_driver_version }}
+          Installation Status: {{ 'SUCCESS' if nvidia_test.rc == 0 else 'FAILED' }}
+          Nouveau Blacklist: {{ 'Created' if nouveau_blacklist_created is changed else 'Already Existed' }}
+          Reboots Performed: {{ (1 if nouveau_blacklist_created is changed else 0) + 1 }}
+          NVIDIA-SMI Working: {{ 'YES' if nvidia_test.rc == 0 else 'NO' }}
+          ===============================================
+
+  post_tasks:
+    - name: Fail if NVIDIA installation was not successful
+      ansible.builtin.fail:
+        msg: "NVIDIA driver installation failed on {{ inventory_hostname }}. Please check the logs above."
+      when: nvidia_test.rc != 0

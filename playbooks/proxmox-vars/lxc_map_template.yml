@@ -1,71 +1,233 @@
 ---
-# Copy this file to playbooks/proxmox-vars/lxc_map.yml and fill in the values.
-# This file is intentionally safe to commit; the filled version should be git-ignored.
+# =============================================================================
+# PROXMOX LXC CONTAINER MAP TEMPLATE
+# =============================================================================
+#
+# INSTRUCTIONS:
+# 1. Copy this file to playbooks/proxmox-vars/lxc_map.yml
+# 2. Replace ALL placeholders marked with <...> with your actual values
+# 3. Update all container configurations (IDs, IPs, specs)
+# 4. Configure NVIDIA driver version if using GPU containers
+# 5. Set proper SSH credentials for container access
+# 6. Adjust network settings for your environment
+#
+# SECURITY WARNING:
+# - Change ALL passwords to secure random values
+# - The filled version should be git-ignored for security
+# - Use SSH keys for passwordless authentication where possible
+#
+# USAGE EXAMPLES:
+# - RKE2/Kubernetes cluster nodes (see lxc_map_octostar_actual.yml)
+# - GPU compute nodes with NVIDIA support (see lxc_map_iris.yml)
+# - Standalone development/jumpbox containers (see lxc_map_iris_jumpbox.yml)
+# - Mixed workload environments with varying resource requirements
+#
+# =============================================================================
 
 proxmox_cluster:
+  # Base Ubuntu 24.04 LTS container template
   template: /var/lib/vz/template/cache/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+  
+  # Network configuration
   bridge: vmbr0
-  vlan_tag: 14
-  gateway: 10.14.1.1
-  mtu: 1500  # Default MTU, change to 9000 for jumbo frames
+  vlan_tag: 14                    # Set to 0 for no VLAN tagging
+  gateway: 10.14.1.1              # Your network gateway
+  mtu: 9000                       # Use 9000 for jumbo frames, 1500 for standard
 
+  # Default storage configuration
   storage_defaults:
-    zfs_pool: temp-pool         # default pool for zfs_volume mounts
-    rootfs: local-lvm:60        # default rootfs storage
+    zfs_pool: temp-pool           # Default ZFS pool for volume mounts
+    rootfs: local-lvm:60          # Default rootfs storage and size
 
+  # SSH access configuration for containers
   ssh:
-    username: adm4n             # container admin user to create
-    password: CHANGE_ME         # set a strong password
+    username: <ADMIN-USERNAME>    # Container admin user to create (e.g., adm8n)
+    password: <CHANGE-ME>         # Set a secure random password
 
+  # NVIDIA GPU driver configuration (for GPU-enabled containers)
+  # The driver will be downloaded directly from NVIDIA during provisioning
+  # No need to manually download or specify host paths - fully automated!
   nvidia:
-    driver_host_path: ""        # e.g., /root/NVIDIA-Linux-x86_64-575.64.05.run on the Proxmox host
-    driver_dest_path: "/root"   # where to copy in the container
-    driver_version: "575.64.05" # NVIDIA driver version number
+    driver_version: "580.82.07"                                  # NVIDIA driver version to download
+
+  # =============================================================================
+  # CONTAINER DEFINITIONS - CUSTOMIZE FOR YOUR ENVIRONMENT
+  # =============================================================================
 
   containers:
-    - id: 101
-      host: 10.0.10.8
-      hostname: os-env-cp-1
-      ip: 10.14.100.1/16
-      memory: 16384
-      cores: 2
-      rootfs: "{{ proxmox_cluster.storage_defaults.rootfs }}"
+    # =======================================================================
+    # CONTROL PLANE / MASTER NODE EXAMPLE
+    # =======================================================================
+    # Suitable for: RKE2 control plane, Kubernetes master, management node
+    # Features: High memory, moderate CPU, no GPU, optional Docker
+    - id: <CONTAINER-ID>          # Unique container ID (e.g., 101)
+      host: <PROXMOX-HOST-IP>     # Proxmox host IP where container will run
+      hostname: <HOSTNAME>        # Container hostname (e.g., cluster-cp-1)
+      ip: <CONTAINER-IP>/16       # Container IP with CIDR (e.g., 10.14.100.1/16)
+      memory: 124000              # RAM in MB (124GB for control plane)
+      cores: 24                   # CPU cores allocated
+      rootfs: local-lvm:60        # Root filesystem storage
       mounts:
-        - type: zfs_volume
-          name: vm-101-data
-          size: 50G
+        - type: storage           # Additional storage volume
+          storage: local-lvm
+          name: vm-<ID>-data      # Replace <ID> with container ID
+          size: 100G
           container_path: /mnt/data
-      gpu: false
-      docker: false  # Install Docker CE for container management tasks
+        # Optional: Add shared storage mounts
+        # - type: directory
+        #   host_path: /mnt/shared/data
+        #   container_path: /mnt/shared
+        #   options: ",ro=1"      # Read-only mount
+      gpu: false                  # No GPU required for control plane
+      docker: true                # Install Docker for container management
 
-    - id: 102
-      host: 10.0.10.1
-      hostname: os-env-gpu-1
-      ip: 10.14.100.2/16
-      memory: 131072
-      cores: 24
-      rootfs: "{{ proxmox_cluster.storage_defaults.rootfs }}"
+    # =======================================================================
+    # GPU WORKER NODE EXAMPLE
+    # =======================================================================
+    # Suitable for: ML workloads, GPU computing, CUDA applications
+    # Features: Maximum memory, high CPU, GPU support, NVIDIA drivers
+    - id: <GPU-CONTAINER-ID>      # Unique container ID (e.g., 102)
+      host: <GPU-HOST-IP>         # Proxmox host with GPU hardware
+      hostname: <GPU-HOSTNAME>    # Container hostname (e.g., cluster-gpu-1)
+      ip: <GPU-CONTAINER-IP>/16   # Container IP with CIDR (e.g., 10.14.100.2/16)
+      memory: 192000              # RAM in MB (192GB for GPU workloads)
+      cores: 32                   # Maximum CPU cores for compute
+      rootfs: local-lvm:60        # Root filesystem storage
       mounts:
-        - type: zfs_volume
-          name: vm-102-data
-          size: 3T
+        - type: storage           # Large storage for datasets/models
+          storage: local-lvm
+          name: vm-<GPU-ID>-data  # Replace <GPU-ID> with container ID
+          size: 3T                # 3TB for large datasets
           container_path: /mnt/data
-      gpu: true
-      docker: true  # Control plane typically needs Docker for management
-      # nvidia_driver_host_path: /root/NVIDIA-Linux-x86_64-575.64.05.run
+        # Example: Mount shared dataset storage
+        # - type: directory
+        #   host_path: /mnt/datasets
+        #   container_path: /mnt/datasets
+        #   options: ",ro=1"
+        # Example: Mount model output storage
+        # - type: directory
+        #   host_path: /mnt/models
+        #   container_path: /mnt/models
+      gpu: true                   # Enable GPU passthrough
+      docker: true                # Install Docker for container runtimes
 
-    - id: 103
-      host: 10.0.10.2
-      hostname: os-env-gpu-2
-      ip: 10.14.100.3/16
-      memory: 131072
-      cores: 24
-      rootfs: "{{ proxmox_cluster.storage_defaults.rootfs }}"
+    # =======================================================================
+    # CPU WORKER NODE EXAMPLE
+    # =======================================================================
+    # Suitable for: General workloads, web services, databases, CPU-intensive tasks
+    # Features: High memory, high CPU, no GPU, lightweight setup
+    - id: <CPU-CONTAINER-ID>      # Unique container ID (e.g., 103)
+      host: <CPU-HOST-IP>         # Proxmox host IP
+      hostname: <CPU-HOSTNAME>    # Container hostname (e.g., cluster-cpu-1)
+      ip: <CPU-CONTAINER-IP>/16   # Container IP with CIDR (e.g., 10.14.100.3/16)
+      memory: 121072              # RAM in MB (118GB for general workloads)
+      cores: 32                   # High CPU for processing tasks
+      rootfs: local-lvm:60        # Root filesystem storage
       mounts:
-        - type: zfs_volume
-          name: vm-103-data
-          size: 3T
+        - type: storage           # Application data storage
+          storage: local-lvm
+          name: vm-<CPU-ID>-data  # Replace <CPU-ID> with container ID
+          size: 1T                # 1TB for application data
           container_path: /mnt/data
-      gpu: true
-      docker: false  # Worker nodes typically don't need Docker
-      # nvidia_driver_host_path: /root/NVIDIA-Linux-x86_64-575.64.05.run
+      gpu: false                  # No GPU required
+      docker: false               # Minimal setup, no Docker
+
+    # =======================================================================
+    # DEVELOPMENT/JUMPBOX EXAMPLE
+    # =======================================================================
+    # Suitable for: Development environment, admin access, debugging, tools
+    # Features: Moderate resources, development tools, shared access
+    - id: <DEV-CONTAINER-ID>      # Unique container ID (e.g., 2100)
+      host: <DEV-HOST-IP>         # Proxmox host IP
+      hostname: <DEV-HOSTNAME>    # Container hostname (e.g., cluster-dev)
+      ip: <DEV-CONTAINER-IP>/16   # Container IP with CIDR (e.g., 10.14.100.100/16)
+      memory: 16384               # RAM in MB (16GB for development)
+      cores: 8                    # Moderate CPU for development tasks
+      rootfs: local-lvm:60        # Root filesystem storage
+      mounts:
+        # Example: Mount shared project storage
+        - type: directory
+          host_path: /mnt/projects
+          container_path: /mnt/projects
+        # Example: Mount application storage  
+        - type: directory
+          host_path: /mnt/apps
+          container_path: /mnt/apps
+      gpu: true                   # Optional GPU for development/testing
+      docker: true                # Install Docker for development containers
+
+# =============================================================================
+# MOUNT TYPE REFERENCE
+# =============================================================================
+#
+# Available mount types and their configurations:
+#
+# 1. STORAGE VOLUME (Dedicated storage volume):
+#    - type: storage
+#    - storage: local-lvm | zfs-pool-name
+#    - name: vm-<ID>-<purpose>
+#    - size: 50G | 1T | 3T
+#    - container_path: /mnt/data
+#
+# 2. ZFS VOLUME (ZFS-specific volume):
+#    - type: zfs_volume
+#    - name: vm-<ID>-<purpose>
+#    - size: 50G | 1T | 3T
+#    - container_path: /mnt/data
+#
+# 3. DIRECTORY BIND MOUNT (Host directory):
+#    - type: directory
+#    - host_path: /path/on/host
+#    - container_path: /path/in/container
+#    - options: ",ro=1" (read-only) | "" (read-write)
+#
+# =============================================================================
+# RESOURCE SIZING GUIDELINES
+# =============================================================================
+#
+# CONTROL PLANE NODES:
+# - Memory: 64GB-128GB (for cluster management overhead)
+# - CPU: 16-24 cores (for API server responsiveness)
+# - Storage: 60GB root + 100GB-500GB data
+# - GPU: Not required
+#
+# GPU WORKER NODES:
+# - Memory: 128GB-256GB (for large model loading)
+# - CPU: 24-32 cores (to match GPU performance)
+# - Storage: 60GB root + 1TB-5TB data (for datasets/models)
+# - GPU: Required with appropriate drivers
+#
+# CPU WORKER NODES:
+# - Memory: 32GB-128GB (based on workload requirements)
+# - CPU: 16-32 cores (for parallel processing)
+# - Storage: 60GB root + 500GB-2TB data
+# - GPU: Not required
+#
+# DEVELOPMENT/ADMIN NODES:
+# - Memory: 8GB-32GB (for development tools)
+# - CPU: 4-16 cores (for compilation and testing)
+# - Storage: 60GB root + shared mounts
+# - GPU: Optional for testing
+#
+# =============================================================================
+# DEPLOYMENT CHECKLIST
+# =============================================================================
+#
+# Before running proxmox-provision.yml, ensure:
+#
+# □ All container IDs are unique and not in use
+# □ All IP addresses are unique and in correct subnets
+# □ All Proxmox host IPs are correct and accessible
+# □ SSH credentials are properly configured
+# □ NVIDIA driver version matches your GPU hardware
+# □ Storage pools exist on target Proxmox hosts
+# □ Network bridges and VLANs are properly configured
+# □ Sufficient resources available on Proxmox hosts
+# □ Mount points exist on Proxmox hosts (for directory mounts)
+#
+# DEPLOYMENT COMMANDS:
+# 1. Provision containers: ansible-playbook -i <inventory> playbooks/proxmox-provision.yml
+# 2. For NVIDIA hosts: ansible-playbook -i <inventory> playbooks/proxmox-nvidia-driver-install.yml
+# 3. Deploy applications: ansible-playbook -i <inventory> playbooks/playbook.yml
+#
+# =============================================================================

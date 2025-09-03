@@ -18,9 +18,7 @@ proxmox_cluster:
     password: password123         # set a strong password
 
   nvidia:
-    driver_host_path: "/root/NVIDIA-Linux-x86_64-575.64.05.run"        # e.g., /root/NVIDIA-Linux-x86_64-575.64.05.run on the Proxmox host
-    driver_dest_path: "/root"   # where to copy in the container
-    driver_version: "575.64.05" # NVIDIA driver version number
+    driver_version: "580.82.07" # NVIDIA driver version number
 
   containers:
     - id: 1000

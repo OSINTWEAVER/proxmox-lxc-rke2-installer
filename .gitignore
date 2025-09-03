@@ -27,6 +27,9 @@ push-to-github.sh
 # Convenience scripts (optional)
 # scripts/fetch_kubeconfig.bat
 
+# Windows batch script for local hosts editing
+add_all_dev_hosts*.bat
+
 # Private development playbooks and configs
 playbooks/update_hosts_iris_dev.yml
 

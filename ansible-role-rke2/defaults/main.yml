@@ -262,6 +262,10 @@ rke2_servers_group_name: rke2_servers
 # Default Ansible Inventory Group name for RKE2 Agents
 rke2_agents_group_name: rke2_agents
 
+# DNS Configuration - Critical for service discovery
+rke2_cluster_dns: "10.43.0.10"
+rke2_cluster_domain: "cluster.local"
+
 # (Optional) A list of Kubernetes API server flags
 # All flags can be found here https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver
 # rke2_kube_apiserver_args: []
