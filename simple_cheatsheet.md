@@ -5,7 +5,9 @@
 ### September 2025 - DNS Resolution & Nuclear Uninstall
 - **DNS Fix**: Resolved DNS resolution failures in helm-operation pods by removing hardcoded `rke2_cluster_dns` values (10.41.0.10) from the main playbook. The playbook now respects inventory-specific DNS settings (e.g., 10.43.0.10 for Octostar).
 - **Nuclear Uninstall Playbook**: Added `playbooks/troubleshooting/rke2_nuclear_uninstall.yml` for complete RKE2 cluster destruction with 10 phases of cleanup, including service stops, process kills, data removal, and network cleanup.
-- **DNS Repair Post-Playbook**: Created `playbooks/post_playbook_dns_repair.yml` for automated DNS fixes on existing clusters with clusterDNS mismatches.
+- **DNS Repair Post-Playbook**: Created `playbooks/troubleshooting/post_playbook_dns_repair.yml` for automated DNS fixes on existing clusters with clusterDNS mismatches.
+- **Enhanced Domain SSL Config**: Updated `post_playbook_domain_ssl_config.yml` to automatically detect and support both upstream ingress-nginx and RKE2 ingress-nginx controllers.
+- **Deprecated Ingress Migration**: Removed `post_playbook_ingress_migration.yml` from workflows as it's no longer needed with the enhanced SSL configuration.
 
 > **📁 Organization**: Troubleshooting and fix playbooks are located in `playbooks/troubleshooting/`, and utility playbooks are in `playbooks/utils/` for better organization and maintenance.
 
@@ -82,7 +84,6 @@ cd ./proxmox-lxc-rke2-installer
 ansible-playbook -i inventories/hosts-octostar.ini playbooks/playbook.yml
 ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_tools.yml
 ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_helm_repos.yml
-ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_ingress_migration.yml
 ansible-playbook -i inventories/hosts-octostar.ini playbooks/post_playbook_simple_storage_test.yml
 
 ```
@@ -115,6 +116,32 @@ ansible-playbook -i inventories/hosts-octostar.ini playbooks/playbook.yml
 ```
 
 ## 🗑️ Cleanup & Destruction
+
+### Nuclear RKE2 Uninstall (Complete Cluster Destruction)
+
+```bash
+# WARNING: This will completely destroy your RKE2 cluster and all data!
+# Use with extreme caution - this is for fresh reinstalls only
+
+# Octostar Cluster
+ansible-playbook -i inventories/hosts-octostar.ini playbooks/troubleshooting/rke2_nuclear_uninstall.yml -e skip_confirmation=true
+
+# Generic cluster (replace with your inventory file)
+ansible-playbook -i inventories/hosts-your-cluster.ini playbooks/troubleshooting/rke2_nuclear_uninstall.yml -e skip_confirmation=true
+```
+
+**What this does:**
+- Stops all RKE2 services
+- Kills all related processes
+- Removes all RKE2 data directories
+- Cleans network configurations
+- Removes RKE2 packages
+- Provides verification of complete cleanup
+
+**Use this when:**
+- You need a completely clean slate for cluster reinstallation
+- Previous installations have left behind conflicting configurations
+- You want to ensure no residual data affects new deployments
 
 ### Destroy LXC Containers for RKE2 (WSL Ansible via Powershell)
 ```powershell

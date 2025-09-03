@@ -11,6 +11,50 @@
     letsencrypt_server: "https://acme-v02.api.letsencrypt.org/directory"
 
   tasks:
+    - name: Detect ingress controller type
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/{{ admin_user }}/.kube/config
+        
+        echo "=== DETECTING INGRESS CONTROLLER ==="
+        
+        # Check for upstream ingress-nginx
+        if /var/lib/rancher/rke2/bin/kubectl get deployment -n ingress-nginx ingress-nginx-controller 2>/dev/null; then
+          echo "UPSTREAM_INGRESS_NGINX"
+          exit 0
+        fi
+        
+        # Check for RKE2 ingress-nginx
+        if /var/lib/rancher/rke2/bin/kubectl get daemonset -n kube-system rke2-ingress-nginx-controller 2>/dev/null; then
+          echo "RKE2_INGRESS_NGINX"
+          exit 0
+        fi
+        
+        echo "NO_INGRESS_CONTROLLER"
+      become_user: "{{ admin_user }}"
+      register: ingress_detection
+
+    - name: Set ingress controller facts
+      ansible.builtin.set_fact:
+        ingress_type: "{{ ingress_detection.stdout | trim }}"
+        ingress_class: "{{ 'nginx' if ingress_detection.stdout | trim == 'UPSTREAM_INGRESS_NGINX' else 'rke2-ingress-nginx' if ingress_detection.stdout | trim == 'RKE2_INGRESS_NGINX' else 'nginx' }}"
+        ingress_namespace: "{{ 'ingress-nginx' if ingress_detection.stdout | trim == 'UPSTREAM_INGRESS_NGINX' else 'kube-system' if ingress_detection.stdout | trim == 'RKE2_INGRESS_NGINX' else 'ingress-nginx' }}"
+
+    - name: Display ingress detection results
+      ansible.builtin.debug:
+        msg: |
+          Ingress Controller Detection Results:
+          ================================
+          Type: {{ ingress_type }}
+          Class: {{ ingress_class }}
+          Namespace: {{ ingress_namespace }}
+          
+          Configuration will be adapted accordingly.
+
+    - name: Fail if no ingress controller found
+      ansible.builtin.fail:
+        msg: "No ingress controller detected! Please ensure either upstream ingress-nginx or RKE2 ingress-nginx is installed."
+      when: ingress_type == "NO_INGRESS_CONTROLLER"
+
     - name: Display domain configuration
       ansible.builtin.debug:
         msg: |
@@ -19,6 +63,7 @@
           Domain: {{ public_domain }}
           Rancher URL: https://{{ rancher_subdomain }}
           Email: {{ letsencrypt_email }}
+          Ingress Type: {{ ingress_type }}
           
           Ensure DNS is configured:
           - {{ public_domain }} -> {{ ansible_default_ipv4.address }}
@@ -76,7 +121,7 @@
             solvers:
             - http01:
                 ingress:
-                  class: nginx
+                  class: {{ ingress_class }}
         EOF
       become_user: "{{ admin_user }}"
 
@@ -142,7 +187,7 @@
             nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
             nginx.ingress.kubernetes.io/proxy-ssl-verify: "false"
         spec:
-          ingressClassName: nginx
+          ingressClassName: {{ ingress_class }}
           tls:
           - hosts:
             - {{ rancher_subdomain }}
@@ -233,7 +278,7 @@
             cert-manager.io/cluster-issuer: "letsencrypt-prod"
             nginx.ingress.kubernetes.io/ssl-redirect: "true"
         spec:
-          ingressClassName: nginx
+          ingressClassName: {{ ingress_class }}
           tls:
           - hosts:
             - {{ public_domain }}
@@ -261,6 +306,12 @@
         echo
         echo "Ingress Resources:"
         /var/lib/rancher/rke2/bin/kubectl get ingress --all-namespaces
+        echo
+        echo "Ingress Controller Info:"
+        echo "- Type: {{ ingress_type }}"
+        echo "- Class: {{ ingress_class }}"
+        echo "- Namespace: {{ ingress_namespace }}"
+        /var/lib/rancher/rke2/bin/kubectl get pods -n {{ ingress_namespace }} -l app.kubernetes.io/name=ingress-nginx 2>/dev/null || /var/lib/rancher/rke2/bin/kubectl get pods -n {{ ingress_namespace }} -l app.kubernetes.io/component=controller 2>/dev/null || echo "Controller pods not found with standard labels"
         echo
         echo "Test URLs:"
         echo "- https://{{ public_domain }}"
