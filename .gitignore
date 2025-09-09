@@ -8,6 +8,9 @@ kubeconfs/
 # Kubeconfig storage (semi-permanent)
 kubeconfig/
 
+# Private test files with real domain names
+smoke_tests/webapp_ssl_simple/test.md
+
 # Inventory files (except templates and examples)
 hosts.ini
 
@@ -50,3 +53,6 @@ install_rancher_only.yml
 
 # Emergency fix playbooks (temporary)
 playbooks/emergency-fix-containers.yml
+
+lxc_map_lightning_iq.yml
+hosts_lightning_iq.ini

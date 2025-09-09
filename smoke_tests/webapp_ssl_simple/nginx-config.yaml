@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ssl-test-nginx-{{SANITIZED_SUBDOMAIN}}
+  namespace: default
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+        
+        location / {
+            root /usr/share/nginx/html;
+            index index.html;
+        }
+        
+        location /api/cluster-stats {
+            alias /usr/share/nginx/html/api/cluster-stats.json;
+            add_header Content-Type application/json;
+            add_header Access-Control-Allow-Origin *;
+        }
+    }

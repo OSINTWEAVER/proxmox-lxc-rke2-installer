@@ -1,0 +1,298 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ssl-test-html-{{SANITIZED_SUBDOMAIN}}
+  namespace: default
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html la            <div class="header">
+                <h1 class="title">SSL Health Check</h1>
+                <p class="subtitle"><span class="status-indicator"></span>{{SUBDOMAIN}} Online</p>
+            </div>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{{SUBDOMAIN}} - Health Check</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 50%, #2d2d2d 100%);
+                color: #ffffff;
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+            }
+            
+            .dashboard {
+                background: rgba(45, 45, 45, 0.9);
+                border: 1px solid #404040;
+                border-radius: 20px;
+                padding: 40px;
+                max-width: 900px;
+                width: 100%;
+                backdrop-filter: blur(10px);
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            }
+            
+            .header {
+                text-align: center;
+                margin-bottom: 40px;
+            }
+            
+            .title {
+                font-size: 2.5em;
+                font-weight: 700;
+                color: #ff7f00;
+                margin-bottom: 10px;
+                text-shadow: 0 2px 4px rgba(255, 127, 0, 0.3);
+            }
+            
+            .subtitle {
+                font-size: 1.2em;
+                color: #cccccc;
+                font-weight: 300;
+            }
+            
+            .message-section {
+                background: linear-gradient(135deg, #ff7f00, #ff9933);
+                color: #000000;
+                padding: 25px;
+                border-radius: 15px;
+                margin: 30px 0;
+                text-align: center;
+                box-shadow: 0 10px 20px rgba(255, 127, 0, 0.2);
+            }
+            
+            .message {
+                font-size: 1.4em;
+                font-weight: 600;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+            }
+            
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin: 30px 0;
+            }
+            
+            .stat-card {
+                background: rgba(15, 15, 15, 0.8);
+                border: 1px solid #404040;
+                border-radius: 12px;
+                padding: 20px;
+                text-align: center;
+                transition: transform 0.3s ease, border-color 0.3s ease;
+            }
+            
+            .stat-card:hover {
+                transform: translateY(-5px);
+                border-color: #ff7f00;
+            }
+            
+            .stat-value {
+                font-size: 2em;
+                font-weight: bold;
+                color: #ff7f00;
+                margin-bottom: 8px;
+            }
+            
+            .stat-label {
+                font-size: 0.9em;
+                color: #cccccc;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }
+            
+            .status-indicator {
+                display: inline-block;
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: #00ff00;
+                margin-right: 8px;
+                box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+                animation: pulse 2s infinite;
+            }
+            
+            @keyframes pulse {
+                0% { opacity: 1; }
+                50% { opacity: 0.5; }
+                100% { opacity: 1; }
+            }
+            
+            .footer {
+                text-align: center;
+                margin-top: 30px;
+                color: #888888;
+                font-size: 0.9em;
+            }
+            
+            .refresh-btn {
+                background: linear-gradient(135deg, #ff7f00, #ff9933);
+                color: #000000;
+                border: none;
+                padding: 12px 24px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-weight: 600;
+                margin-top: 20px;
+                transition: transform 0.2s ease;
+            }
+            
+            .refresh-btn:hover {
+                transform: scale(1.05);
+            }
+            
+            @media (max-width: 768px) {
+                .dashboard {
+                    padding: 20px;
+                }
+                
+                .title {
+                    font-size: 2em;
+                }
+                
+                .stats-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="dashboard">
+            <div class="message-section">
+                <div class="message">{{MESSAGE}}</div>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="ssl-status">Active</div>
+                    <div class="stat-label">SSL Status</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="pod-status">Running</div>
+                    <div class="stat-label">Pod Status</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="worker-nodes">--</div>
+                    <div class="stat-label">Worker Nodes</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="control-nodes">--</div>
+                    <div class="stat-label">Control Nodes</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="total-cpus">--</div>
+                    <div class="stat-label">Total CPUs</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="total-memory">--</div>
+                    <div class="stat-label">Total Memory</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="gpu-count">--</div>
+                    <div class="stat-label">GPU Devices</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="gpu-types">--</div>
+                    <div class="stat-label">GPU Types</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="total-vram">--</div>
+                    <div class="stat-label">Total VRAM</div>
+                </div>
+            </div>
+            
+            <div class="footer">
+                <button class="refresh-btn" onclick="updateStats()">Refresh Health Check</button>
+                <p>Powered by RKE2 Kubernetes • Let's Encrypt SSL</p>
+            </div>
+        </div>
+        
+        <script>
+            function updateStats() {
+                // SSL is working if we're here
+                document.getElementById('ssl-status').textContent = 'Active';
+                document.getElementById('ssl-status').style.color = '#00ff00';
+                
+                // Pod is running if we're serving content
+                document.getElementById('pod-status').textContent = 'Running';
+                document.getElementById('pod-status').style.color = '#00ff00';
+                
+                // Fetch real cluster stats from the stats service
+                fetch('/api/cluster-stats')
+                    .then(response => response.json())
+                    .then(data => {
+                        // Update worker nodes
+                        document.getElementById('worker-nodes').textContent = data.worker_nodes || '--';
+                        document.getElementById('worker-nodes').style.color = '#00ff00';
+                        
+                        // Update control nodes
+                        document.getElementById('control-nodes').textContent = data.control_nodes || '--';
+                        document.getElementById('control-nodes').style.color = '#00ff00';
+                        
+                        // Update total CPUs
+                        document.getElementById('total-cpus').textContent = data.total_cpus || '--';
+                        document.getElementById('total-cpus').style.color = '#00ff00';
+                        
+                        // Update total memory
+                        document.getElementById('total-memory').textContent = data.total_memory || '--';
+                        document.getElementById('total-memory').style.color = '#00ff00';
+                        
+                        // Update GPU count
+                        document.getElementById('gpu-count').textContent = data.gpu_count || '0';
+                        document.getElementById('gpu-count').style.color = data.gpu_count > 0 ? '#00ff00' : '#ff7f00';
+                        
+                        // Update GPU types
+                        document.getElementById('gpu-types').textContent = data.gpu_types || 'None';
+                        document.getElementById('gpu-types').style.color = data.gpu_types !== 'None' ? '#00ff00' : '#ff7f00';
+                        
+                        // Update total VRAM
+                        document.getElementById('total-vram').textContent = data.total_vram || '0GB';
+                        document.getElementById('total-vram').style.color = data.gpu_count > 0 ? '#00ff00' : '#ff7f00';
+                    })
+                    .catch(error => {
+                        // Set error state for all cluster stats
+                        ['worker-nodes', 'control-nodes', 'total-cpus', 'total-memory', 'gpu-count', 'gpu-types', 'total-vram'].forEach(id => {
+                            const element = document.getElementById(id);
+                            element.textContent = 'Error';
+                            element.style.color = '#ff0000';
+                        });
+                    });
+            }
+            
+            // Update on page load
+            window.addEventListener('load', function() {
+                updateStats();
+                
+                // Update stats every 10 seconds
+                setInterval(updateStats, 10000);
+                
+                // Add load animations
+                const cards = document.querySelectorAll('.stat-card');
+                cards.forEach((card, index) => {
+                    setTimeout(() => {
+                        card.style.opacity = '0';
+                        card.style.transform = 'translateY(20px)';
+                        card.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+                        setTimeout(() => {
+                            card.style.opacity = '1';
+                            card.style.transform = 'translateY(0)';
+                        }, 50);
+                    }, index * 100);
+                });
+            });
+        </script>
+    </body>
+    </html>

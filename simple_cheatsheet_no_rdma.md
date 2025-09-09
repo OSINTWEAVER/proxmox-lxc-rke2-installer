@@ -9,6 +9,12 @@ wsl bash -c "./trust_ssh_hosts.sh inventories/hosts_proxmox.ini"
 
 ## 🔧 Host Setup
 
+### Download Ubuntu Templates
+```Powershell
+# Download Ubuntu 22.04 LTS template to all Proxmox hosts
+wsl bash -c "ansible-playbook -i inventories/hosts_proxmox.ini playbooks/proxmox-template-download-ubuntu2204.yml"
+```
+
 ### NVIDIA Drivers
 ```Powershell
 wsl bash -c "ansible-playbook -i inventories/hosts_proxmox.ini playbooks/proxmox-nvidia-driver-install.yml -e nvidia_driver_version=580.82.07"

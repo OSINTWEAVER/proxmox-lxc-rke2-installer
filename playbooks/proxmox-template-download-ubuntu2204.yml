@@ -1,0 +1,95 @@
+---
+- name: Download Ubuntu 22.04 LTS template to all Proxmox hosts using pveam
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    # Ubuntu 22.04 LTS template identifier for pveam
+    ubuntu_2204_template: "ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+
+  pre_tasks:
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+    - name: Show current host information
+      ansible.builtin.debug:
+        msg: "Processing Proxmox host: {{ inventory_hostname }} ({{ ansible_default_ipv4.address }})"
+
+  tasks:
+    - name: Update available template list
+      ansible.builtin.shell: pveam update
+      changed_when: false
+
+    - name: Check available Ubuntu templates
+      ansible.builtin.shell: pveam available --section system | grep ubuntu
+      register: available_templates
+      changed_when: false
+      failed_when: false
+
+    - name: Show available Ubuntu templates
+      ansible.builtin.debug:
+        msg: |
+          📋 Available Ubuntu templates on {{ inventory_hostname }}:
+          {{ available_templates.stdout_lines | join('\n') }}
+      when: available_templates.stdout_lines is defined
+
+    - name: Check if Ubuntu 22.04 template already downloaded
+      ansible.builtin.shell: pveam list local | grep "{{ ubuntu_2204_template }}"
+      register: template_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Show current template status
+      ansible.builtin.debug:
+        msg: >
+          {% if template_exists.rc == 0 %}
+          ✅ Ubuntu 22.04 template already exists locally
+          {% else %}
+          📥 Ubuntu 22.04 template not found locally, will download...
+          {% endif %}
+
+    - name: Download Ubuntu 22.04 LTS template using pveam
+      ansible.builtin.shell: pveam download local {{ ubuntu_2204_template }}
+      register: download_result
+      when: template_exists.rc != 0
+      changed_when: true
+
+    - name: Show download results
+      ansible.builtin.debug:
+        msg: >
+          {% if download_result is changed %}
+          ✅ Successfully downloaded Ubuntu 22.04 template using pveam!
+          {% elif template_exists.rc == 0 %}
+          ✅ Ubuntu 22.04 template was already present
+          {% else %}
+          ⚠️  Template download was skipped
+          {% endif %}
+
+    - name: List all local templates after download
+      ansible.builtin.shell: pveam list local | grep ubuntu || echo "No local Ubuntu templates found"
+      register: local_templates
+      changed_when: false
+
+    - name: Show local Ubuntu templates
+      ansible.builtin.debug:
+        msg: |
+          📦 Local Ubuntu templates on {{ inventory_hostname }}:
+          {{ local_templates.stdout_lines | join('\n') }}
+
+  post_tasks:
+    - name: Final summary
+      ansible.builtin.debug:
+        msg: |
+          🎉 Ubuntu 22.04 Template Setup Complete on {{ inventory_hostname }}!
+          
+          📍 Template managed by pveam
+          🔧 Ready for LXC container creation
+          
+          💡 Usage in LXC maps:
+          template: /var/lib/vz/template/cache/{{ ubuntu_2204_template }}
+          
+          📝 Example pct create command:
+          pct create 100 /var/lib/vz/template/cache/{{ ubuntu_2204_template }} --hostname test-jammy --cores 2 --memory 2048 --net0 name=eth0,bridge=vmbr0,ip=dhcp --storage local-lvm --unprivileged 1

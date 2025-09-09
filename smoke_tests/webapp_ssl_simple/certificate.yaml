@@ -1,0 +1,12 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{SANITIZED_SUBDOMAIN}}-cert
+  namespace: default
+spec:
+  secretName: {{SANITIZED_SUBDOMAIN}}-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - "{{SUBDOMAIN}}"

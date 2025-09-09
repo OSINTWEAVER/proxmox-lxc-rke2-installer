@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ssl-test-webapp-service-{{SANITIZED_SUBDOMAIN}}
+  namespace: default
+  labels:
+    app: ssl-test-webapp
+    subdomain: "{{SUBDOMAIN}}"
+spec:
+  selector:
+    app: ssl-test-webapp
+    subdomain: "{{SUBDOMAIN}}"
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ssl-test-webapp-ingress-{{SANITIZED_SUBDOMAIN}}
+  namespace: default
+  labels:
+    app: ssl-test-webapp
+    subdomain: "{{SUBDOMAIN}}"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - {{SUBDOMAIN}}
+    secretName: {{SANITIZED_SUBDOMAIN}}-tls
+  rules:
+  - host: {{SUBDOMAIN}}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ssl-test-webapp-service-{{SANITIZED_SUBDOMAIN}}
+            port:
+              number: 80

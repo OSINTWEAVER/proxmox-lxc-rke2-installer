@@ -1,0 +1,201 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ssl-test-webapp-{{SANITIZED_SUBDOMAIN}}
+  namespace: default
+  labels:
+    app: ssl-test-webapp
+    subdomain: "{{SUBDOMAIN}}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ssl-test-webapp
+      subdomain: "{{SUBDOMAIN}}"
+  template:
+    metadata:
+      labels:
+        app: ssl-test-webapp
+        subdomain: "{{SUBDOMAIN}}"
+    spec:
+      serviceAccountName: ssl-test-cluster-reader-{{SANITIZED_SUBDOMAIN}}
+{{RUNTIME_CLASS_SPEC}}      initContainers:
+      - name: stats-generator
+        image: {{CONTAINER_IMAGE}}
+        command: ["/bin/bash"]
+        args:
+          - -c
+          - |
+            # Detect if this is Ubuntu (CUDA) or standard Ubuntu
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update && apt-get install -y curl jq bc
+            else
+              # Fallback for other distros
+              apk add --no-cache curl jq bc 2>/dev/null || (
+                yum install -y curl jq bc 2>/dev/null || 
+                echo "Could not install packages"
+              )
+            fi
+            
+            echo "🔍 Generating cluster statistics..."
+            
+            # Get all nodes
+            NODES_JSON=$(curl -s -k -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+              https://kubernetes.default.svc.cluster.local/api/v1/nodes)
+            
+            if [ $? -ne 0 ] || [ -z "$NODES_JSON" ]; then
+              echo '{"error": "Failed to fetch nodes", "timestamp": "'$(date -Iseconds)'"}' > /data/cluster-stats.json
+              exit 0
+            fi
+            
+            # Count worker and control nodes
+            WORKER_NODES=$(echo "$NODES_JSON" | jq '[.items[] | select(.metadata.labels."node-role.kubernetes.io/control-plane" != "true")] | length')
+            CONTROL_NODES=$(echo "$NODES_JSON" | jq '[.items[] | select(.metadata.labels."node-role.kubernetes.io/control-plane" == "true")] | length')
+            
+            # Calculate total CPUs and memory
+            TOTAL_CPUS=$(echo "$NODES_JSON" | jq '[.items[].status.capacity.cpu | tonumber] | add')
+            
+            # Handle memory with different units (Ki, Mi, Gi)
+            TOTAL_MEMORY_KB=0
+            for memory in $(echo "$NODES_JSON" | jq -r '.items[].status.capacity.memory'); do
+              if echo "$memory" | grep -q "Ki$"; then
+                KB=$(echo "$memory" | sed 's/Ki$//')
+                TOTAL_MEMORY_KB=$((TOTAL_MEMORY_KB + KB))
+              elif echo "$memory" | grep -q "Mi$"; then
+                MB=$(echo "$memory" | sed 's/Mi$//')
+                TOTAL_MEMORY_KB=$((TOTAL_MEMORY_KB + MB * 1024))
+              elif echo "$memory" | grep -q "Gi$"; then
+                GB=$(echo "$memory" | sed 's/Gi$//')
+                TOTAL_MEMORY_KB=$((TOTAL_MEMORY_KB + GB * 1048576))
+              fi
+            done
+            TOTAL_MEMORY_GB=$(echo "scale=1; $TOTAL_MEMORY_KB / 1048576" | bc 2>/dev/null || echo "0")
+            
+            # Find GPUs using cluster-wide detection
+            GPU_COUNT=0
+            GPU_TYPES="None"
+            TOTAL_VRAM_GB=0
+            
+            echo "🎮 Detecting GPU hardware across entire cluster..."
+            
+            # Get all GPU-enabled nodes
+            GPU_NODES=$(echo "$NODES_JSON" | jq -r '.items[] | select(.metadata.labels."nvidia.com/gpu.present" == "true") | .metadata.name')
+            
+            if [ -n "$GPU_NODES" ]; then
+              GPU_NODE_COUNT=$(echo "$GPU_NODES" | wc -l)
+              echo "🔍 Found $GPU_NODE_COUNT GPU nodes: $(echo "$GPU_NODES" | tr '\n' ' ')"
+              
+              # Try to get detailed GPU info from current node if nvidia-smi is available
+              SAMPLE_GPU_NAME=""
+              SAMPLE_GPU_VRAM_GB=0
+              
+              if command -v nvidia-smi >/dev/null 2>&1; then
+                echo "✅ nvidia-smi available, detecting sample GPU specs..."
+                NVIDIA_SMI_OUTPUT=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null)
+                
+                if [ $? -eq 0 ] && [ -n "$NVIDIA_SMI_OUTPUT" ]; then
+                  # Parse first GPU as sample (assuming homogeneous cluster)
+                  FIRST_GPU=$(echo "$NVIDIA_SMI_OUTPUT" | head -1)
+                  SAMPLE_GPU_NAME=$(echo "$FIRST_GPU" | cut -d',' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                  SAMPLE_GPU_VRAM_MB=$(echo "$FIRST_GPU" | cut -d',' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                  
+                  # Round UP to nearest GB for display
+                  SAMPLE_GPU_VRAM_GB=$(echo "scale=0; ($SAMPLE_GPU_VRAM_MB + 1023) / 1024" | bc 2>/dev/null || echo "0")
+                  
+                  echo "🎯 Sample GPU detected: $SAMPLE_GPU_NAME with ${SAMPLE_GPU_VRAM_GB}GB VRAM"
+                fi
+              fi
+              
+              # Try to get GPU count from Kubernetes capacity first
+              CLUSTER_GPU_COUNT=$(echo "$NODES_JSON" | jq '[.items[] | select(.metadata.labels."nvidia.com/gpu.present" == "true") | .status.capacity."nvidia.com/gpu" // "0" | tonumber] | add')
+              
+              if [ "$CLUSTER_GPU_COUNT" -gt 0 ]; then
+                # GPU device plugin is working
+                GPU_COUNT=$CLUSTER_GPU_COUNT
+                echo "✅ GPU device plugin detected $GPU_COUNT total GPUs"
+              else
+                # GPU device plugin not working, assume 1 GPU per labeled node (common case)
+                GPU_COUNT=$GPU_NODE_COUNT
+                echo "⚠️  GPU device plugin not detected, assuming 1 GPU per labeled node = $GPU_COUNT GPUs"
+              fi
+              
+              # Build GPU description
+              if [ -n "$SAMPLE_GPU_NAME" ] && [ "$SAMPLE_GPU_VRAM_GB" -gt 0 ]; then
+                GPU_TYPES="$SAMPLE_GPU_NAME ${SAMPLE_GPU_VRAM_GB}GB x${GPU_COUNT}"
+                TOTAL_VRAM_GB=$((SAMPLE_GPU_VRAM_GB * GPU_COUNT))
+                echo "🎯 Cluster GPUs: $GPU_TYPES"
+                echo "🎯 Total VRAM: ${TOTAL_VRAM_GB}GB across $GPU_COUNT GPUs"
+              else
+                # Fallback to generic info
+                GPU_TYPES="NVIDIA GPU x${GPU_COUNT} (specs unavailable)"
+                TOTAL_VRAM_GB="Unknown"
+                echo "⚠️  GPU specs unavailable, showing generic count"
+              fi
+            else
+              echo "ℹ️  No GPU nodes found in cluster"
+              GPU_COUNT=0
+              GPU_TYPES="None"  
+              TOTAL_VRAM_GB="0"
+            fi
+            
+            # Generate final JSON with timestamp
+            cat > /data/cluster-stats.json << EOJSON
+            {
+              "worker_nodes": $WORKER_NODES,
+              "control_nodes": $CONTROL_NODES,
+              "total_cpus": $TOTAL_CPUS,
+              "total_memory": "${TOTAL_MEMORY_GB}G",
+              "gpu_count": $GPU_COUNT,
+              "gpu_types": "$GPU_TYPES",
+              "total_vram": "${TOTAL_VRAM_GB}GB",
+              "generated_at": "$(date -Iseconds)",
+              "cluster_name": "{{SUBDOMAIN}}"
+            }
+            EOJSON
+            
+            echo "✅ Cluster stats generated successfully!"
+            cat /data/cluster-stats.json
+        volumeMounts:
+        - name: stats-data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "utility"
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d
+        - name: stats-data
+          mountPath: /usr/share/nginx/html/api
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+      volumes:
+      - name: html
+        configMap:
+          name: ssl-test-html-{{SANITIZED_SUBDOMAIN}}
+      - name: nginx-config
+        configMap:
+          name: ssl-test-nginx-{{SANITIZED_SUBDOMAIN}}
+      - name: stats-data
+        persistentVolumeClaim:
+          claimName: ssl-test-cluster-stats-{{SANITIZED_SUBDOMAIN}}
