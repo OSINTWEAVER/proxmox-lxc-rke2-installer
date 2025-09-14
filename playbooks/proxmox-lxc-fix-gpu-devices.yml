@@ -1,0 +1,211 @@
+---
+- name: Fix GPU and device permissions for existing LXC containers
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    # Default map file; override with: -e lxc_map_file=playbooks/proxmox-vars/your_map.yml
+    lxc_map_file: proxmox-vars/lxc_map_template.yml
+
+  pre_tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+    - name: Show containers to be fixed on this host
+      ansible.builtin.debug:
+        msg: "Will fix containers: {{ (proxmox_cluster.containers | selectattr('host', 'equalto', inventory_hostname) | map(attribute='id') | list) | join(', ') }}"
+
+  tasks:
+    - name: Check if container exists before fixing
+      when: item.host == inventory_hostname
+      ansible.builtin.stat:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+      register: container_config_exists
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Show containers that will be processed
+      when: item.item.host == inventory_hostname and item.stat.exists
+      ansible.builtin.debug:
+        msg: "✅ Container {{ item.item.id }} ({{ item.item.hostname }}) config exists and will be fixed"
+      loop: "{{ container_config_exists.results | default([]) }}"
+
+    - name: Show containers that will be skipped
+      when: item.item.host == inventory_hostname and not item.stat.exists
+      ansible.builtin.debug:
+        msg: "⚠️  Container {{ item.item.id }} ({{ item.item.hostname }}) config not found - skipping"
+      loop: "{{ container_config_exists.results | default([]) }}"
+
+    - name: Get current container status
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: pct status {{ item.id }} || echo "not-found"
+      args:
+        executable: /bin/bash
+      register: container_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Show current container statuses
+      when: item.item.host == inventory_hostname
+      ansible.builtin.debug:
+        msg: "Container {{ item.item.id }}: {{ item.stdout.strip() }}"
+      loop: "{{ container_status.results | default([]) }}"
+
+    - name: Stop containers that are currently running
+      when: item.item.host == inventory_hostname and ('running' in item.stdout)
+      ansible.builtin.shell: pct stop {{ item.item.id }}
+      args:
+        executable: /bin/bash
+      register: stop_result
+      failed_when: false
+      loop: "{{ container_status.results | default([]) }}"
+
+    - name: Wait for containers to fully stop
+      when: item.item.host == inventory_hostname and ('running' in item.stdout)
+      ansible.builtin.shell: |
+        for i in {1..30}; do
+          status=$(pct status {{ item.item.id }} 2>/dev/null || echo "stopped")
+          if [[ "$status" == *"stopped"* ]]; then
+            echo "Container {{ item.item.id }} stopped successfully"
+            exit 0
+          fi
+          echo "Waiting for container {{ item.item.id }} to stop... ($i/30)"
+          sleep 2
+        done
+        echo "Container {{ item.item.id }} did not stop cleanly"
+        exit 1
+      args:
+        executable: /bin/bash
+      loop: "{{ container_status.results | default([]) }}"
+
+    - name: Check if GPU/device settings already exist in config
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        config_file="/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        if [[ -f "$config_file" ]]; then
+          if grep -q "LXC_GPU_DEVICE_FIX" "$config_file"; then
+            echo "already-patched"
+          else
+            echo "needs-patching"
+          fi
+        else
+          echo "no-config"
+        fi
+      args:
+        executable: /bin/bash
+      register: patch_status
+      changed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Show patch status for each container
+      when: item.item.host == inventory_hostname
+      ansible.builtin.debug:
+        msg: >
+          Container {{ item.item.id }} ({{ item.item.hostname }}): 
+          {% if item.stdout.strip() == 'already-patched' %}
+          ✅ Already has GPU/device fixes applied
+          {% elif item.stdout.strip() == 'needs-patching' %}
+          🔧 Needs GPU/device fixes applied
+          {% else %}
+          ⚠️  Config file not found
+          {% endif %}
+      loop: "{{ patch_status.results | default([]) }}"
+
+    - name: Apply GPU and device fixes to container configs
+      when: item.item.host == inventory_hostname and item.stdout.strip() == 'needs-patching'
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.item.id }}.conf"
+        marker: "# {mark} LXC_GPU_DEVICE_FIX"
+        block: |
+          lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+          lxc.cgroup2.devices.allow: c 195:* rwm
+          lxc.cgroup2.devices.allow: c 510:* rwm
+          lxc.cgroup2.devices.allow: c 235:* rwm
+          lxc.cgroup2.devices.allow: c 0:* rwm
+        create: false
+      register: config_updated
+      loop: "{{ patch_status.results | default([]) }}"
+
+    - name: Show configuration update results
+      when: item.item.item.host == inventory_hostname and item.changed
+      ansible.builtin.debug:
+        msg: "✅ Updated GPU/device configuration for container {{ item.item.item.id }} ({{ item.item.item.hostname }})"
+      loop: "{{ config_updated.results | default([]) }}"
+
+    - name: Start containers back up (only those that were running or need to be started)
+      when: >
+        item.item.host == inventory_hostname and 
+        (container_config_exists.results | selectattr('item.id', 'equalto', item.item.id) | first).stat.exists
+      ansible.builtin.shell: |
+        # Start container if it exists
+        config_exists=$(ls "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.item.id }}.conf" 2>/dev/null || echo "")
+        if [[ -n "$config_exists" ]]; then
+          echo "Starting container {{ item.item.id }}"
+          pct start {{ item.item.id }} || echo "Failed to start container {{ item.item.id }}"
+        else
+          echo "Container {{ item.item.id }} config not found, skipping start"
+        fi
+      args:
+        executable: /bin/bash
+      register: start_result
+      failed_when: false
+      loop: "{{ container_status.results | default([]) }}"
+
+    - name: Wait for containers to fully start
+      when: item.item.item.host == inventory_hostname
+      ansible.builtin.shell: |
+        for i in {1..60}; do
+          if pct exec {{ item.item.item.id }} -- test -f /proc/version 2>/dev/null; then
+            echo "Container {{ item.item.item.id }} is ready"
+            exit 0
+          fi
+          echo "Waiting for container {{ item.item.item.id }} to be ready... ($i/60)"
+          sleep 3
+        done
+        echo "Container {{ item.item.item.id }} may not have started properly"
+        exit 1
+      args:
+        executable: /bin/bash
+      register: container_ready_check
+      failed_when: false
+      loop: "{{ start_result.results | default([]) }}"
+
+    - name: Verify final container status
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: pct status {{ item.id }} || echo "status-unknown"
+      args:
+        executable: /bin/bash
+      register: final_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+  post_tasks:
+    - name: Display final summary
+      ansible.builtin.debug:
+        msg: |
+          🎉 GPU/Device Fix Summary for {{ inventory_hostname }}:
+          
+          {% for result in final_status.results | default([]) %}
+          {% if result.item.host == inventory_hostname %}
+          📋 Container {{ result.item.id }} ({{ result.item.hostname }}): {{ result.stdout.strip() }}
+          {% endif %}
+          {% endfor %}
+          
+          ✅ GPU and device permissions have been applied to existing containers!
+          
+          🔧 Applied fixes:
+          - lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+          - lxc.cgroup2.devices.allow: c 195:* rwm (NVIDIA devices)
+          - lxc.cgroup2.devices.allow: c 510:* rwm (NVIDIA UVM)
+          - lxc.cgroup2.devices.allow: c 235:* rwm (NVIDIA modeset)
+          - lxc.cgroup2.devices.allow: c 0:* rwm (Generic devices)
+          
+          💡 Containers should now have proper GPU access when running NVIDIA workloads!

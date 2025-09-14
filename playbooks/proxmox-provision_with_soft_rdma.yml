@@ -183,11 +183,13 @@
         path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
         marker: "# {mark} LXC_K8S_SETTINGS"
         block: |
-          features: mount=cifs;nfs
           lxc.apparmor.profile = unconfined
           lxc.cgroup2.devices.allow: a
           lxc.cgroup2.devices.allow: b
-          lxc.cgroup2.devices.allow: c 
+          lxc.cgroup2.devices.allow: c 195:* rwm
+          lxc.cgroup2.devices.allow: c 510:* rwm
+          lxc.cgroup2.devices.allow: c 235:* rwm
+          lxc.cgroup2.devices.allow: c 0:* rwm
           lxc.mount.auto: proc:rw sys:rw cgroup:rw
           lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
           lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file

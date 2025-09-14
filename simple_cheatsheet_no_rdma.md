@@ -81,6 +81,11 @@ wsl bash -c "ansible-playbook -i inventories/hosts_proxmox.ini playbooks/proxmox
 
 ## 🛠️ Troubleshooting
 
+### Fix GPU/Device Permissions on Existing Containers
+```powershell
+wsl bash -c "ansible-playbook -i inventories/hosts_proxmox.ini playbooks/proxmox-lxc-fix-gpu-devices.yml -e lxc_map_file=proxmox-vars/lxc_map_my_lab.yml"
+```
+
 ### Storage Issues
 ```bash
 ansible-playbook -i inventories/hosts-my-lab.ini playbooks/troubleshooting/fix_storage.yml
