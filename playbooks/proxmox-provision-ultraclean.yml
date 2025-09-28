@@ -1,0 +1,240 @@
+---
+- name: Provision LXC containers on Proxmox hosts (Ultra Clean - No Optimizations)
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    # Default map file; override with: -e lxc_map_file=playbooks/proxmox-vars/your_map.yml
+    lxc_map_file: proxmox-vars/lxc_map_template.yml
+
+  pre_tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+    - name: Show LXC plan for this host
+      ansible.builtin.debug:
+        var: (proxmox_cluster.containers | selectattr('host', 'equalto', inventory_hostname) | list)
+
+  tasks:
+    - name: Ensure required kernel modules are loaded (essential only)
+      ansible.builtin.shell: |
+        modprobe overlay || true
+        modprobe br_netfilter || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Persist essential kernel modules across reboots
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: "{{ item }}"
+        create: true
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Configure minimal sysctl for Kubernetes
+      ansible.builtin.blockinfile:
+        path: /etc/sysctl.conf
+        marker: "# {mark} KUBERNETES_MINIMAL"
+        block: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+        create: true
+
+    - name: Apply sysctl configuration
+      ansible.builtin.shell: sysctl -p
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Prepare data storage for mounts (ZFS volumes and directories)
+      ansible.builtin.include_tasks: utils/proxmox-mount-prep.yml
+      when: item.host == inventory_hostname and (item.mounts is defined) and (mount is defined)
+      loop: "{{ proxmox_cluster.containers | subelements('mounts', skip_missing=True) }}"
+      loop_control:
+        loop_var: item_mount
+      vars:
+        item: "{{ item_mount.0 }}"
+        mount: "{{ item_mount.1 }}"
+
+    - name: Build mount flags string for pct create
+      when: item.host == inventory_hostname
+      ansible.builtin.set_fact:
+        pct_mount_flags: >-
+          {%- set flags = [] -%}
+          {%- if item.mounts is defined -%}
+          {%- for m in item.mounts -%}
+            {%- set idx = loop.index0 -%}
+            {%- if m.type == 'zfs_volume' -%}
+              {%- set src = '/dev/zvol/' + (m.pool | default(proxmox_cluster.storage_defaults.zfs_pool)) + '/' + m.name -%}
+            {%- elif m.type == 'directory' -%}
+              {%- set src = m.host_path -%}
+            {%- elif m.type == 'storage' -%}
+              {%- set src = None -%}
+            {%- elif m.type == 'lvm_lv' -%}
+              {%- set src = '/dev/' + m.vg + '/' + m.lv -%}
+            {%- else -%}
+              {%- set src = '' -%}
+            {%- endif -%}
+            {%- if m.type == 'storage' -%}
+              {%- set storage = m.storage | default(proxmox_cluster.storage_defaults.rootfs.split(':')[0]) -%}
+              {%- set rawsz = (m.size | string) -%}
+              {%- set lower = rawsz | lower -%}
+              {%- if lower.endswith('t') -%}
+                {%- set size_gib = (((lower[0:-1] | float) * 1024) | round(0, 'floor')) | int -%}
+              {%- elif lower.endswith('g') -%}
+                {%- set size_gib = ((lower[0:-1] | float) | round(0, 'floor')) | int -%}
+              {%- elif lower.endswith('m') -%}
+                {%- set size_gib = ((((lower[0:-1] | float) / 1024) | round(0, 'ceil')) | int) | max(1) -%}
+              {%- else -%}
+                {%- set size_gib = (lower | float) | round(0, 'floor') | int -%}
+              {%- endif -%}
+              {%- set base = '--mp' ~ idx ~ ' ' ~ storage ~ ':' ~ (size_gib | string) ~ ',mp=' ~ m.container_path -%}
+              {%- if m.options is defined and m.options|length > 0 -%}
+                {%- set _ = flags.append(base ~ (m.options if m.options.startswith(',') else (',' ~ m.options))) -%}
+              {%- elif m.read_only | default(false) -%}
+                {%- set _ = flags.append(base ~ ',ro=1') -%}
+              {%- else -%}
+                {%- set _ = flags.append(base) -%}
+              {%- endif -%}
+            {%- elif src -%}
+              {%- set base = '--mp' + idx|string + ' ' + src + ',mp=' + m.container_path -%}
+              {%- if m.options is defined and m.options|length > 0 -%}
+                {%- set _ = flags.append(base + (m.options if m.options.startswith(',') else (',' + m.options))) -%}
+              {%- elif m.read_only | default(false) -%}
+                {%- set _ = flags.append(base + ',ro=1') -%}
+              {%- else -%}
+                {%- set _ = flags.append(base) -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {{ flags | join(' ') }}
+      loop: "{{ proxmox_cluster.containers }}"
+      register: pct_mount_flags_results
+
+    - name: Map results to host/container id
+      when: item.item.host == inventory_hostname
+      ansible.builtin.set_fact:
+        pct_mount_flags_map: "{{ (pct_mount_flags_map | default({})) | combine({ item.item.id: (item.ansible_facts.pct_mount_flags | trim) }) }}"
+      loop: "{{ pct_mount_flags_results.results }}"
+
+    - name: Create LXC containers if missing
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: >-
+        pct create {{ item.id }} {{ proxmox_cluster.template }}
+        --hostname {{ item.hostname }}
+        --memory {{ item.memory }}
+        --cores {{ item.cores }}
+        --net0 name=eth0,bridge={{ proxmox_cluster.bridge }},firewall=1,gw={{ proxmox_cluster.gateway }},ip={{ item.ip }}{% if proxmox_cluster.vlan_tag is defined and proxmox_cluster.vlan_tag and proxmox_cluster.vlan_tag != 0 %},tag={{ proxmox_cluster.vlan_tag }}{% endif %},type=veth
+        --ostype ubuntu --swap 0 --rootfs {{ item.rootfs }}
+        {{ pct_mount_flags_map[item.id] | default('') }}
+        --unprivileged 0
+      args:
+        executable: /bin/bash
+        creates: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Apply minimal LXC security profile for Kubernetes
+      when: item.host == inventory_hostname
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_K8S_MINIMAL"
+        block: |
+          lxc.apparmor.profile = unconfined
+          lxc.cgroup2.devices.allow: a
+          lxc.mount.auto: proc:rw sys:rw cgroup:rw
+          lxc.prlimit.memlock: unlimited
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Start LXC containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: pct start {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: start_container_result
+      changed_when: start_container_result.rc == 0
+      failed_when: start_container_result.rc not in [0, 133]  # 133 = already running
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Wait for containers to be ready
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        for i in {1..20}; do
+          if pct exec {{ item.id }} -- test -f /proc/version; then
+            echo "Container {{ item.id }} is ready"
+            exit 0
+          fi
+          echo "Waiting for container {{ item.id }}... ($i/20)"
+          sleep 2
+        done
+        echo "Container {{ item.id }} failed to start"
+        exit 1
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    # ===== ULTRA MINIMAL CONFIGURATION =====
+    
+    - name: Basic swap disable
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- swapoff -a || true
+        pct exec {{ item.id }} -- sed -i '/swap/d' /etc/fstab || true
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Single apt update (with timeout)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        timeout 300 pct exec {{ item.id }} -- apt update || echo "Apt update timed out or failed for {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install only critical packages
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt install -y --no-install-recommends \
+          curl openssh-server sudo
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Create SSH user (minimal)
+      when: item.host == inventory_hostname
+      vars:
+        user_name: "{{ item.ssh_user | default(proxmox_cluster.ssh.username | default('adm4n')) }}"
+        user_password: "{{ item.ssh_password | default(proxmox_cluster.ssh.password | default('CHANGE_THIS_PASSWORD')) }}"
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- adduser --disabled-password --gecos "" {{ user_name }} || true
+        pct exec {{ item.id }} -- echo "{{ user_name }}:{{ user_password }}" | chpasswd
+        pct exec {{ item.id }} -- usermod -aG sudo {{ user_name }}
+        pct exec {{ item.id }} -- echo "{{ user_name }} ALL=(ALL) NOPASSWD:ALL" > /tmp/{{ user_name }}_sudo
+        pct exec {{ item.id }} -- cp /tmp/{{ user_name }}_sudo /etc/sudoers.d/{{ user_name }}
+        pct exec {{ item.id }} -- chmod 440 /etc/sudoers.d/{{ user_name }}
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Show final container status
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: pct status {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: final_status
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Display results
+      ansible.builtin.debug:
+        msg: "✅ Container {{ item.item.id }} -> {{ item.stdout }}"
+      loop: "{{ final_status.results | default([]) }}"

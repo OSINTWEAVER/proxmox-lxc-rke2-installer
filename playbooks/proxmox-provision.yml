@@ -150,7 +150,7 @@
         --hostname {{ item.hostname }}
         --memory {{ item.memory }}
         --cores {{ item.cores }}
-        --net0 name=eth0,bridge={{ proxmox_cluster.bridge }},firewall=1,gw={{ proxmox_cluster.gateway }},ip={{ item.ip }}{% if proxmox_cluster.vlan_tag is defined and proxmox_cluster.vlan_tag and proxmox_cluster.vlan_tag != 0 %},tag={{ proxmox_cluster.vlan_tag }}{% endif %},type=veth{% if proxmox_cluster.mtu is defined and proxmox_cluster.mtu %},mtu={{ proxmox_cluster.mtu }}{% endif %}
+        --net0 name=eth0,bridge={{ proxmox_cluster.bridge }},firewall=1,gw={{ proxmox_cluster.gateway }},ip={{ item.ip }}{% if proxmox_cluster.vlan_tag is defined and proxmox_cluster.vlan_tag and proxmox_cluster.vlan_tag != 0 %},tag={{ proxmox_cluster.vlan_tag }}{% endif %},type=veth
         --ostype ubuntu --swap 0 --rootfs {{ item.rootfs }}
         {{ pct_mount_flags_map[item.id] | default('') }}
         --unprivileged 0
@@ -168,10 +168,7 @@
           lxc.apparmor.profile = unconfined
           lxc.cgroup2.devices.allow: a
           lxc.cgroup2.devices.allow: b
-          lxc.cgroup2.devices.allow: c 195:* rwm
-          lxc.cgroup2.devices.allow: c 510:* rwm
-          lxc.cgroup2.devices.allow: c 235:* rwm
-          lxc.cgroup2.devices.allow: c 0:* rwm
+          lxc.cgroup2.devices.allow: c
           lxc.mount.auto: proc:rw sys:rw cgroup:rw
           lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
           lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file

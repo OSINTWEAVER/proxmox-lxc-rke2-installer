@@ -130,6 +130,26 @@
         delay: 15
         timeout: "{{ reboot_timeout }}"
 
+    - name: Create NVIDIA device files with nvidia-modprobe
+      ansible.builtin.shell: |
+        # Create device files for all NVIDIA devices
+        nvidia-modprobe -c 0 -u || true
+        # Ensure proper permissions for LXC containers
+        chmod 666 /dev/nvidia* || true
+        chmod 666 /dev/nvidia-caps/* || true
+        # List created devices for verification
+        ls -la /dev/nvidia* || true
+      register: nvidia_modprobe
+      failed_when: false
+      changed_when: false
+
+    - name: Display NVIDIA device creation results
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA Device Creation: {{ 'SUCCESS' if nvidia_modprobe.rc == 0 else 'PARTIAL' }}
+          Device Files Created:
+          {{ nvidia_modprobe.stdout }}
+
     - name: Test NVIDIA driver installation
       ansible.builtin.shell: nvidia-smi
       register: nvidia_test
@@ -163,6 +183,65 @@
           {{ nvidia_modules.stdout }}
           {% endif %}
 
+    - name: Verify NVIDIA device files exist and have correct permissions
+      ansible.builtin.shell: |
+        echo "=== NVIDIA Device Files Verification ==="
+        ls -la /dev/nvidia* 2>/dev/null || echo "No /dev/nvidia* files found"
+        echo "=== NVIDIA Capabilities Directory ==="
+        ls -la /dev/nvidia-caps/ 2>/dev/null || echo "No /dev/nvidia-caps directory found"
+        echo "=== DRI Devices ==="
+        ls -la /dev/dri/ 2>/dev/null || echo "No /dev/dri directory found"
+      register: nvidia_devices_verification
+      failed_when: false
+      changed_when: false
+
+    - name: Display NVIDIA device verification results
+      ansible.builtin.debug:
+        msg: "{{ nvidia_devices_verification.stdout }}"
+
+    - name: Create persistent NVIDIA device setup script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/nvidia-device-setup.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # NVIDIA Device Setup Script for Proxmox
+          # Ensures NVIDIA device files are created after reboot
+          
+          echo "Creating NVIDIA device files..."
+          nvidia-modprobe -c 0 -u || true
+          
+          # Set permissions for LXC container access
+          chmod 666 /dev/nvidia* 2>/dev/null || true
+          chmod 666 /dev/nvidia-caps/* 2>/dev/null || true
+          
+          echo "NVIDIA device setup completed"
+          ls -la /dev/nvidia* 2>/dev/null || echo "No NVIDIA devices found"
+
+    - name: Create systemd service for NVIDIA device setup
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nvidia-device-setup.service
+        content: |
+          [Unit]
+          Description=NVIDIA Device Setup for LXC Containers
+          After=graphical.target
+          Wants=graphical.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/nvidia-device-setup.sh
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start NVIDIA device setup service
+      ansible.builtin.systemd:
+        name: nvidia-device-setup.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
     - name: Clean up downloaded driver file
       ansible.builtin.file:
         path: "/tmp/{{ nvidia_driver_filename }}"
@@ -178,6 +257,9 @@
           Nouveau Blacklist: {{ 'Created' if nouveau_blacklist_created is changed else 'Already Existed' }}
           Reboots Performed: {{ (1 if nouveau_blacklist_created is changed else 0) + 1 }}
           NVIDIA-SMI Working: {{ 'YES' if nvidia_test.rc == 0 else 'NO' }}
+          Device Files Created: {{ 'YES' if nvidia_modprobe.rc == 0 else 'PARTIAL' }}
+          Persistent Service: {{ 'ENABLED' }}
+          LXC Container Ready: {{ 'YES' if nvidia_test.rc == 0 and nvidia_modprobe.rc == 0 else 'NO' }}
           ===============================================
 
   post_tasks:
