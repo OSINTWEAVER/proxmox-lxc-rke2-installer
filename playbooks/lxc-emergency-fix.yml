@@ -1,0 +1,106 @@
+---
+- name: Fix broken LXC container configurations (Emergency Fix)
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    # Default map file; override with: -e lxc_map_file=playbooks/proxmox-vars/your_map.yml
+    lxc_map_file: proxmox-vars/lxc_map_template.yml
+
+  pre_tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+  tasks:
+    - name: Remove broken LXC security configurations
+      when: item.host == inventory_hostname
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_K8S_SETTINGS"
+        state: absent
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Apply CORRECT LXC security profile for Kubernetes (FIXED)
+      when: item.host == inventory_hostname
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_K8S_SETTINGS_FIXED"
+        block: |
+          # === CRITICAL KUBERNETES CONFIGURATIONS (FIXED SYNTAX) ===
+          lxc.apparmor.profile = unconfined
+          lxc.cgroup2.devices.allow = a
+          lxc.cap.drop = 
+          lxc.mount.auto = proc:rw sys:rw cgroup:rw
+          
+          # === ESSENTIAL DEVICE ACCESS (MINIMAL) ===
+          lxc.mount.entry = /dev/null dev/null none bind,optional,create=file
+          lxc.mount.entry = /dev/zero dev/zero none bind,optional,create=file
+          lxc.mount.entry = /dev/random dev/random none bind,optional,create=file
+          lxc.mount.entry = /dev/urandom dev/urandom none bind,optional,create=file
+          
+          # === KUBERNETES REQUIREMENTS (ESSENTIAL ONLY) ===
+          lxc.mount.entry = /dev/kmsg dev/kmsg none bind,optional,create=file
+          lxc.mount.entry = /dev/fuse dev/fuse none bind,optional,create=file
+          
+          # === SECURITY AND LIMITS ===
+          lxc.prlimit.memlock = unlimited
+          lxc.prlimit.nofile = 1048576
+          lxc.prlimit.nproc = unlimited
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Apply GPU device configurations ONLY for GPU containers
+      when: 
+        - item.host == inventory_hostname
+        - item.gpu is defined and item.gpu == true
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_GPU_SETTINGS"
+        block: |
+          # === GPU PASSTHROUGH (NVIDIA) - GPU CONTAINERS ONLY ===
+          lxc.mount.entry = /dev/dri dev/dri none bind,optional,create=dir
+          lxc.mount.entry = /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
+          lxc.mount.entry = /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
+          lxc.mount.entry = /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
+          lxc.mount.entry = /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
+          lxc.mount.entry = /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+          lxc.mount.entry = /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Attempt to start containers with fixed configurations
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: pct start {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: start_container_result
+      changed_when: start_container_result.rc == 0
+      failed_when: false  # Don't fail the playbook if container doesn't start
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Show container start results
+      ansible.builtin.debug:
+        msg: "Container {{ item.item.id }} start result: RC={{ item.rc }}, STDOUT={{ item.stdout }}, STDERR={{ item.stderr }}"
+      loop: "{{ start_container_result.results }}"
+      when: item.item.host == inventory_hostname
+
+    - name: Check final container status
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct status {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: pct_status_final
+      changed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Print final container status
+      ansible.builtin.debug:
+        msg: "Container {{ item.item.id }} FINAL STATUS: {{ item.stdout | default('') }}"
+      loop: "{{ pct_status_final.results | default([]) }}"
+      when: item.item.host == inventory_hostname

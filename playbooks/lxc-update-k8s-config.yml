@@ -1,0 +1,186 @@
+---
+- name: Update existing LXC containers with Kubernetes security configurations
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    # Default map file; override with: -e lxc_map_file=playbooks/proxmox-vars/your_map.yml
+    lxc_map_file: proxmox-vars/lxc_map_template.yml
+
+  pre_tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+    - name: Show LXC containers to update on this host
+      ansible.builtin.debug:
+        var: (proxmox_cluster.containers | selectattr('host', 'equalto', inventory_hostname) | list)
+
+  tasks:
+    - name: Ensure critical kernel modules are loaded on Proxmox host (ESSENTIAL FOR K8S)
+      ansible.builtin.shell: |
+        set -e
+        # Core networking modules
+        modprobe overlay || echo "Warning: overlay module load failed"
+        modprobe br_netfilter || echo "Warning: br_netfilter module load failed"
+        modprobe ip_tables || echo "Warning: ip_tables module load failed"
+        modprobe ip6_tables || echo "Warning: ip6_tables module load failed"
+        modprobe nf_nat || echo "Warning: nf_nat module load failed"
+        modprobe xt_conntrack || echo "Warning: xt_conntrack module load failed"
+        modprobe nf_conntrack || echo "Warning: nf_conntrack module load failed"
+        
+        # Additional kernel modules needed for Kubernetes
+        modprobe xt_REDIRECT || echo "Warning: xt_REDIRECT module load failed"
+        modprobe xt_owner || echo "Warning: xt_owner module load failed"
+        modprobe iptable_nat || echo "Warning: iptable_nat module load failed"
+        modprobe iptable_filter || echo "Warning: iptable_filter module load failed"
+        
+        # Verify critical modules
+        echo "=== KERNEL MODULE STATUS ==="
+        lsmod | grep -E "(overlay|br_netfilter|ip_tables|nf_nat|xt_conntrack)" || true
+        echo "=== END MODULE STATUS ==="
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Check if container exists and get its status
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        if pct list | grep -q "^{{ item.id }}"; then
+          echo "exists"
+          pct status {{ item.id }}
+        else
+          echo "missing"
+        fi
+      args:
+        executable: /bin/bash
+      register: container_status_check
+      changed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Stop containers that are running (needed for config updates)
+      when: 
+        - item.item.host == inventory_hostname
+        - "'running' in item.stdout"
+      ansible.builtin.shell: pct stop {{ item.item.id }}
+      args:
+        executable: /bin/bash
+      register: stop_result
+      loop: "{{ container_status_check.results }}"
+
+    - name: Apply comprehensive LXC security profile for Kubernetes (CRITICAL UPDATE)
+      when: 
+        - item.item.host == inventory_hostname
+        - "'exists' in item.stdout"
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.item.id }}.conf"
+        marker: "# {mark} LXC_K8S_SETTINGS"
+        block: |
+          # === CRITICAL KUBERNETES CONFIGURATIONS ===
+          lxc.apparmor.profile = unconfined
+          lxc.cgroup2.devices.allow: a
+          lxc.cap.drop: 
+          lxc.mount.auto: proc:rw sys:rw cgroup:rw
+          
+          # === ESSENTIAL DEVICE ACCESS ===
+          lxc.mount.entry: /dev/console dev/console none bind,optional,create=file
+          lxc.mount.entry: /dev/full dev/full none bind,optional,create=file
+          lxc.mount.entry: /dev/null dev/null none bind,optional,create=file
+          lxc.mount.entry: /dev/random dev/random none bind,optional,create=file
+          lxc.mount.entry: /dev/tty dev/tty none bind,optional,create=file
+          lxc.mount.entry: /dev/urandom dev/urandom none bind,optional,create=file
+          lxc.mount.entry: /dev/zero dev/zero none bind,optional,create=file
+          
+          # === KUBERNETES REQUIREMENTS ===
+          lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+          lxc.mount.entry: /sys/kernel/security sys/kernel/security none bind,optional
+          lxc.mount.entry: /sys/fs/fuse/connections sys/fs/fuse/connections none bind,optional
+          
+          # === CONTAINER RUNTIME SUPPORT ===
+          lxc.mount.entry: /dev/fuse dev/fuse none bind,optional,create=file
+          lxc.mount.entry: /proc/sys/kernel/keys proc/sys/kernel/keys none bind,optional
+          
+          # === GPU PASSTHROUGH (NVIDIA) ===
+          lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
+          lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia1 dev/nvidia1 none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+          lxc.mount.entry: /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
+          
+          # === SECURITY AND LIMITS ===
+          lxc.prlimit.memlock: unlimited
+          lxc.prlimit.nofile: 1048576
+          lxc.prlimit.nproc: unlimited
+      loop: "{{ container_status_check.results }}"
+
+    - name: Start containers with updated configurations
+      when: 
+        - item.item.host == inventory_hostname
+        - "'exists' in item.stdout"
+      ansible.builtin.shell: pct start {{ item.item.id }}
+      args:
+        executable: /bin/bash
+      register: start_container_result
+      changed_when: start_container_result.rc == 0
+      failed_when: start_container_result.rc not in [0, 133]  # 133 = already running
+      loop: "{{ container_status_check.results }}"
+
+    - name: Wait for containers to be fully started with new configs
+      when: 
+        - item.item.host == inventory_hostname
+        - "'exists' in item.stdout"
+      ansible.builtin.shell: |
+        for i in {1..30}; do
+          if pct exec {{ item.item.id }} -- test -f /proc/version; then
+            echo "Container {{ item.item.id }} is ready with updated configs"
+            exit 0
+          fi
+          echo "Waiting for container {{ item.item.id }} to be ready... ($i/30)"
+          sleep 3
+        done
+        echo "Container {{ item.item.id }} failed to start properly"
+        exit 1
+      args:
+        executable: /bin/bash
+      loop: "{{ container_status_check.results }}"
+
+    - name: Verify container configurations are applied
+      when: 
+        - item.item.host == inventory_hostname
+        - "'exists' in item.stdout"
+      ansible.builtin.shell: |
+        echo "=== LXC CONFIG FOR CONTAINER {{ item.item.id }} ==="
+        grep -A 20 "LXC_K8S_SETTINGS" "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.item.id }}.conf" || echo "Config not found"
+        echo "=== END CONFIG ==="
+      args:
+        executable: /bin/bash
+      register: config_verification
+      changed_when: false
+      loop: "{{ container_status_check.results }}"
+
+    - name: Show updated container status
+      when: 
+        - item.item.host == inventory_hostname
+        - "'exists' in item.stdout"
+      ansible.builtin.shell: |
+        pct status {{ item.item.id }}
+      args:
+        executable: /bin/bash
+      register: pct_status_out
+      changed_when: false
+      loop: "{{ container_status_check.results }}"
+
+    - name: Print update summaries
+      ansible.builtin.debug:
+        msg: "Container {{ item.item.item.id }} -> {{ item.stdout | default('') }}"
+      loop: "{{ pct_status_out.results | default([]) }}"
+      when: item.stdout is defined

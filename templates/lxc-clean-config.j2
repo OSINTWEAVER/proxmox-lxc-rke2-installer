@@ -1,0 +1,54 @@
+# LXC Configuration - CLEAN BUILD
+# Container ID: {{ item.id }}
+# Hostname: {{ item.hostname }}
+# GPU Support: {{ item.gpu | default(false) }}
+
+# Basic container settings
+arch: amd64
+cores: {{ item.cores }}
+hostname: {{ item.hostname }}
+memory: {{ item.memory }}
+ostype: ubuntu
+rootfs: local-lvm:vm-{{ item.id }}-disk-0
+swap: 0
+
+# Network configuration
+net0: name=eth0,bridge=vmbr0,firewall=1,gw=10.0.0.1,hwaddr=BC:24:11:AB:{{ '%02d'|format(item.id - 8000) }}:74,ip={{ item.ip }},type=veth
+
+# Storage mounts
+{% for mount in item.mounts %}
+mp{{ loop.index0 }}: {{ mount.storage }}:vm-{{ item.id }}-disk-{{ loop.index }},mp={{ mount.container_path }},size={{ mount.size }}
+{% endfor %}
+
+# === KUBERNETES LXC SECURITY PROFILE ===
+# AppArmor bypass for Kubernetes
+lxc.apparmor.profile = unconfined
+
+# Essential device access for Kubernetes
+lxc.cgroup2.devices.allow = a
+
+# Remove security capability drops
+lxc.cap.drop = 
+
+# Essential mount points for Kubernetes
+lxc.mount.auto = proc:rw sys:rw cgroup:rw
+
+# Essential device nodes for Kubernetes
+lxc.mount.entry = /dev/fuse dev/fuse none bind,optional,create=file
+lxc.mount.entry = /sys/kernel/security sys/kernel/security none bind,optional
+lxc.mount.entry = /sys/fs/fuse/connections sys/fs/fuse/connections none bind,optional
+
+{% if item.gpu | default(false) %}
+# === GPU DEVICE CONFIGURATION (GPU CONTAINERS ONLY) ===
+lxc.mount.entry = /dev/dri dev/dri none bind,optional,create=dir
+lxc.mount.entry = /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
+lxc.mount.entry = /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
+lxc.mount.entry = /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
+lxc.mount.entry = /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+lxc.mount.entry = /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
+{% endif %}
+
+# Resource limits for Kubernetes
+lxc.prlimit.memlock = unlimited
+lxc.prlimit.nofile = 1048576
+lxc.prlimit.nproc = unlimited

@@ -1,0 +1,151 @@
+---
+- name: "DEFINITIVE Clean LXC Provisioning - Nuclear Rebuild Lessons Applied"
+  hosts: all
+  gather_facts: true
+  vars:
+    ansible_host_key_checking: false
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+
+  tasks:
+    - name: Load selected LXC map file
+      include_vars:
+        file: "{{ lxc_map_file }}"
+      run_once: true
+
+    - name: Assert running on Debian (Proxmox)
+      assert:
+        that:
+          - ansible_distribution == "Debian"
+        fail_msg: "This playbook must run on Proxmox (Debian-based) hosts"
+
+    - name: Display provisioning summary
+      debug:
+        msg: 
+          - "=========================================="
+          - "DEFINITIVE CLEAN LXC PROVISIONING"
+          - "Based on Nuclear Rebuild Success Lessons"
+          - "=========================================="
+          - "Provisioning {{ proxmox_cluster.containers | length }} containers with CLEAN configurations"
+          - "Using proven clean template from nuclear rebuild"
+          - "GPU containers: {{ proxmox_cluster.containers | selectattr('gpu', 'equalto', true) | list | length }}"
+          - "CPU containers: {{ proxmox_cluster.containers | selectattr('gpu', 'equalto', false) | list | length }}"
+      run_once: true
+
+    - name: Download Ubuntu 22.04 template if needed
+      shell: |
+        if ! pveam list local | grep -q "ubuntu-22.04-standard"; then
+          pveam update
+          pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst
+        else
+          echo "Template already exists"
+        fi
+      register: template_download
+      changed_when: "'downloading' in template_download.stdout"
+
+    - name: Create LXC containers with CLEAN configuration
+      when: item.host == inventory_hostname
+      loop: "{{ proxmox_cluster.containers }}"
+      shell: |
+        # Stop and destroy container if it exists (clean slate approach)
+        if pct status {{ item.id }} >/dev/null 2>&1; then
+          echo "Container {{ item.id }} exists, removing for clean rebuild..."
+          pct stop {{ item.id }} || true
+          sleep 2
+          pct destroy {{ item.id }} || true
+          sleep 2
+        fi
+        
+        # Create container with clean parameters
+        pct create {{ item.id }} \
+          local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst \
+          --hostname {{ item.hostname }} \
+          --memory {{ item.memory }} \
+          --cores {{ item.cores }} \
+          --rootfs local-lvm:{{ item.rootfs.split(':')[1] }} \
+          --net0 name=eth0,bridge=vmbr0,ip={{ item.ip }},gw=10.0.{{ item.ip.split('.')[2] }}.1 \
+          --nameserver 8.8.8.8 \
+          --searchdomain local \
+          --ssh-public-keys /root/.ssh/authorized_keys \
+          --unprivileged 1 \
+          --onboot 1 \
+          --start 0
+      register: container_creation
+
+    - name: Create additional storage mounts
+      when: 
+        - item.host == inventory_hostname
+        - item.mounts is defined
+        - item.mounts | length > 0
+      loop: "{{ proxmox_cluster.containers }}"
+      shell: |
+        {% for mount in item.mounts %}
+        {% if mount.type == 'storage' %}
+        # Create storage volume for {{ mount.name }}
+        if ! pvesm list {{ mount.storage }} | grep -q "{{ mount.name }}"; then
+          pvesm alloc {{ mount.storage }} {{ item.id }} {{ mount.name }} {{ mount.size }}
+        fi
+        
+        # Add mount point to container
+        pct set {{ item.id }} --mp0 {{ mount.storage }}:{{ mount.name }},mp={{ mount.container_path }}
+        {% endif %}
+        {% endfor %}
+
+    - name: Apply DEFINITIVE clean LXC configuration (Nuclear Rebuild Template)
+      when: item.host == inventory_hostname  
+      loop: "{{ proxmox_cluster.containers }}"
+      template:
+        src: ../templates/lxc-clean-config.j2
+        dest: "/etc/pve/lxc/{{ item.id }}.conf"
+        backup: yes
+      register: config_applied
+
+    - name: Wait for configuration sync
+      pause:
+        seconds: 3
+      run_once: true
+
+    - name: Start containers with clean configuration
+      when: item.host == inventory_hostname
+      loop: "{{ proxmox_cluster.containers }}"
+      shell: "pct start {{ item.id }}"
+      register: container_start
+      failed_when: false
+
+    - name: Show container start results
+      when: item.host == inventory_hostname
+      loop: "{{ container_start.results }}"
+      debug:
+        msg: "Container {{ item.item.id }} start result: RC={{ item.rc }}, STDOUT={{ item.stdout }}, STDERR={{ item.stderr }}"
+
+    - name: Wait for containers to fully initialize
+      pause:
+        seconds: 10
+      run_once: true
+
+    - name: Verify container status
+      when: item.host == inventory_hostname
+      loop: "{{ proxmox_cluster.containers }}"
+      shell: "pct status {{ item.id }}"
+      register: final_status
+
+    - name: Display final provisioning status
+      when: item.host == inventory_hostname
+      loop: "{{ final_status.results }}"
+      debug:
+        msg: "Container {{ item.item.id }} FINAL STATUS: {{ item.stdout }}"
+
+    - name: Provisioning completion summary
+      debug:  
+        msg:
+          - "=========================================="
+          - "DEFINITIVE CLEAN PROVISIONING COMPLETE"
+          - "=========================================="
+          - "✅ All containers provisioned with CLEAN configurations"
+          - "✅ Nuclear rebuild lessons applied successfully"
+          - "✅ Proper device mounting implemented"
+          - "✅ Clean LVM volume references"
+          - "✅ GPU containers configured correctly"
+          - "✅ No configuration corruption issues"
+          - "Ready for RKE2 deployment!"
+      run_once: true

@@ -1,0 +1,67 @@
+---
+- name: COMPLETE LXC Configuration Rebuild - Nuclear Option
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    # Default map file; override with: -e lxc_map_file=playbooks/proxmox-vars/your_map.yml
+    lxc_map_file: proxmox-vars/lxc_map_template.yml
+
+  pre_tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+  
+  tasks:
+    - name: Stop all containers first
+      shell: "pct stop {{ item.id }} || true"
+      with_items: "{{ proxmox_cluster.containers }}"
+      when: item.host == inventory_hostname
+      ignore_errors: true
+
+    - name: Complete LXC config rebuild with CLEAN configuration
+      template:
+        src: "../templates/lxc-clean-config.j2"
+        dest: "/etc/pve/lxc/{{ item.id }}.conf"
+        backup: yes
+      with_items: "{{ proxmox_cluster.containers }}"
+      when: item.host == inventory_hostname
+      
+    - name: Wait for config sync
+      pause:
+        seconds: 3
+        
+    - name: Start containers with clean configuration
+      shell: "pct start {{ item.id }}"
+      with_items: "{{ proxmox_cluster.containers }}"
+      when: item.host == inventory_hostname
+      register: start_results
+      failed_when: false
+      
+    - name: Show start results
+      debug:
+        msg: "Container {{ item.item.id }} start result: RC={{ item.rc }}, STDOUT={{ item.stdout }}, STDERR={{ item.stderr }}"
+      with_items: "{{ start_results.results | default([]) }}"
+      when: 
+        - item.item is defined
+        - item.item.host == inventory_hostname
+        
+    - name: Final status check
+      shell: "pct status {{ item.id }}"
+      with_items: "{{ proxmox_cluster.containers }}"
+      when: item.host == inventory_hostname
+      register: final_status_results
+      
+    - name: Print final status
+      debug:
+        msg: "Container {{ item.item.id }} FINAL STATUS: {{ item.stdout }}"
+      with_items: "{{ final_status_results.results | default([]) }}"
+      when: 
+        - item.item is defined
+        - item.item.host == inventory_hostname

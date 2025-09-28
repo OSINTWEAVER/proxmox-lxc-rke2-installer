@@ -1,0 +1,234 @@
+---
+- name: Install NVIDIA drivers in LXC containers
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+  vars:
+    # Default map file; override with: -e lxc_map_file=playbooks/proxmox-vars/your_map.yml
+    lxc_map_file: proxmox-vars/lxc_map_template.yml
+
+  pre_tasks:
+    - name: Load selected LXC map file
+      ansible.builtin.include_vars:
+        file: "{{ lxc_map_file }}"
+
+    - name: Set NVIDIA driver version
+      ansible.builtin.set_fact:
+        nvidia_driver_version: "{{ proxmox_cluster.nvidia.driver_version | default('580.82.07') }}"
+
+    - name: Assert running on Debian (Proxmox)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+    - name: Show GPU containers for this host
+      ansible.builtin.debug:
+        msg: "GPU containers on {{ inventory_hostname }}: {{ (proxmox_cluster.containers | selectattr('host', 'equalto', inventory_hostname) | selectattr('gpu', 'defined') | selectattr('gpu', 'equalto', true) | list) | map(attribute='id') | list }}"
+
+  tasks:
+    - name: Check if containers are running
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: pct status {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: container_status
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Display container status
+      when: item.item.host == inventory_hostname and (item.item.gpu | default(false))
+      ansible.builtin.debug:
+        msg: "Container {{ item.item.id }}: {{ item.stdout }}"
+      loop: "{{ container_status.results | default([]) }}"
+
+    - name: Start GPU containers if not running
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: |
+        if ! pct status {{ item.id }} | grep -q running; then
+          echo "Starting container {{ item.id }}"
+          pct start {{ item.id }}
+          sleep 5
+        else
+          echo "Container {{ item.id }} already running"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Wait for GPU containers to be ready
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: |
+        for i in {1..30}; do
+          if pct exec {{ item.id }} -- test -f /proc/version; then
+            echo "Container {{ item.id }} is ready for NVIDIA installation"
+            exit 0
+          fi
+          echo "Waiting for container {{ item.id }} to be ready... ($i/30)"
+          sleep 3
+        done
+        echo "Container {{ item.id }} failed to become ready"
+        exit 1
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Download NVIDIA driver into GPU containers
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      vars:
+        driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+        driver_filename: "NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+        dest_dir: "/root"
+      ansible.builtin.shell: |
+        echo "Downloading NVIDIA driver {{ nvidia_driver_version }} for container {{ item.id }}"
+        pct exec {{ item.id }} -- wget -O "{{ dest_dir }}/{{ driver_filename }}" "{{ driver_url }}"
+        pct exec {{ item.id }} -- chmod +x "{{ dest_dir }}/{{ driver_filename }}"
+        echo "Downloaded: {{ dest_dir }}/{{ driver_filename }} in container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install NVIDIA driver dependencies in GPU containers
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: |
+        echo "Installing NVIDIA driver dependencies in container {{ item.id }}"
+        pct exec {{ item.id }} -- apt update
+        pct exec {{ item.id }} -- apt install -y build-essential dkms linux-headers-generic wget kmod
+        echo "Dependencies installed in container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Remove existing NVIDIA packages (cleanup)
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: |
+        echo "Cleaning up existing NVIDIA packages in container {{ item.id }}"
+        pct exec {{ item.id }} -- apt-get remove --purge '^nvidia-.*' libnvidia-* || true
+        pct exec {{ item.id }} -- apt-get autoremove --purge -y || true
+        echo "Cleanup completed for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Install NVIDIA driver in GPU containers
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      vars:
+        driver_filename: "NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+        dest_dir: "/root"
+      ansible.builtin.shell: |
+        echo "Installing NVIDIA driver {{ nvidia_driver_version }} in container {{ item.id }}"
+        driver_file="{{ dest_dir }}/{{ driver_filename }}"
+        
+        if pct exec {{ item.id }} -- test -f "$driver_file"; then
+          # Install NVIDIA driver for LXC containers (no kernel module, no DRM)
+          pct exec {{ item.id }} -- bash -c "cd {{ dest_dir }} && ./{{ driver_filename }} --dkms --no-questions --ui=none --no-kernel-module --no-drm --install-libglvnd --silent"
+          
+          # Update library cache
+          pct exec {{ item.id }} -- ldconfig
+          
+          echo "✅ NVIDIA driver installation completed for container {{ item.id }}"
+        else
+          echo "❌ ERROR: NVIDIA driver file not found: $driver_file in container {{ item.id }}"
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      register: nvidia_driver_install
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Display NVIDIA driver installation results
+      when: item.item.host == inventory_hostname and (item.item.gpu | default(false))
+      ansible.builtin.debug:
+        msg: |
+          Container {{ item.item.id }} NVIDIA installation: 
+          {{ 'SUCCESS' if item.rc == 0 else 'FAILED' }}
+          Output: {{ item.stdout_lines[-5:] | join(', ') if item.stdout_lines else 'No output' }}
+      loop: "{{ nvidia_driver_install.results | default([]) }}"
+
+    - name: Test NVIDIA driver installation
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: |
+        echo "Testing NVIDIA driver in container {{ item.id }}"
+        pct exec {{ item.id }} -- nvidia-smi
+      args:
+        executable: /bin/bash
+      register: nvidia_test
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Display NVIDIA test results
+      when: item.item.host == inventory_hostname and (item.item.gpu | default(false))
+      ansible.builtin.debug:
+        msg: |
+          🔬 Container {{ item.item.id }} NVIDIA Test: {{ '✅ PASSED' if item.rc == 0 else '❌ FAILED' }}
+          {% if item.rc == 0 %}
+          GPU Info: {{ item.stdout_lines[0] if item.stdout_lines else 'nvidia-smi executed successfully' }}
+          {% else %}
+          Error: {{ item.stderr if item.stderr else 'nvidia-smi command failed' }}
+          {% endif %}
+      loop: "{{ nvidia_test.results | default([]) }}"
+
+    - name: Create NVIDIA device files (if missing)
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: |
+        echo "Ensuring NVIDIA device files exist in container {{ item.id }}"
+        pct exec {{ item.id }} -- bash -c '
+          # Create device files if they don'\''t exist
+          [ ! -c /dev/nvidia0 ] && mknod /dev/nvidia0 c 195 0 || true
+          [ ! -c /dev/nvidiactl ] && mknod /dev/nvidiactl c 195 255 || true
+          [ ! -c /dev/nvidia-uvm ] && mknod /dev/nvidia-uvm c 243 0 || true
+          [ ! -c /dev/nvidia-uvm-tools ] && mknod /dev/nvidia-uvm-tools c 243 1 || true
+          [ ! -c /dev/nvidia-modeset ] && mknod /dev/nvidia-modeset c 195 254 || true
+          
+          # Set proper permissions
+          chmod 666 /dev/nvidia* 2>/dev/null || true
+          
+          echo "Device files checked/created"
+        '
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Final NVIDIA validation
+      when: item.host == inventory_hostname and (item.gpu | default(false))
+      ansible.builtin.shell: |
+        echo "=== Final NVIDIA Validation for Container {{ item.id }} ==="
+        echo "NVIDIA SMI Test:"
+        pct exec {{ item.id }} -- nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>/dev/null || echo "nvidia-smi failed"
+        echo ""
+        echo "Device Files:"
+        pct exec {{ item.id }} -- ls -la /dev/nvidia* 2>/dev/null || echo "No NVIDIA device files found"
+        echo ""
+        echo "NVIDIA Libraries:"
+        pct exec {{ item.id }} -- ldconfig -p | grep nvidia | head -3 2>/dev/null || echo "No NVIDIA libraries found"
+        echo "=== End Validation ==="
+      args:
+        executable: /bin/bash
+      register: final_validation
+      failed_when: false
+      loop: "{{ proxmox_cluster.containers }}"
+
+    - name: Display final validation results
+      when: item.item.host == inventory_hostname and (item.item.gpu | default(false))
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ final_validation.results | default([]) }}"
+
+  post_tasks:
+    - name: Summary of NVIDIA installation
+      ansible.builtin.debug:
+        msg: |
+          🚀 NVIDIA Driver Installation Complete!
+          
+          ✅ Driver Version: {{ nvidia_driver_version }}
+          ✅ Processed GPU containers: {{ (proxmox_cluster.containers | selectattr('gpu', 'defined') | selectattr('gpu', 'equalto', true) | list) | length }}
+          
+          🔍 Test NVIDIA access with:
+          ssh user@container_ip "nvidia-smi"
+          
+          📋 GPU containers by host:
+          {% for host in groups['proxmox_hosts'] %}
+          - {{ host }}: {{ (proxmox_cluster.containers | selectattr('host', 'equalto', host) | selectattr('gpu', 'defined') | selectattr('gpu', 'equalto', true) | list) | map(attribute='id') | list | join(', ') or 'No GPU containers' }}
+          {% endfor %}
+      run_once: true
